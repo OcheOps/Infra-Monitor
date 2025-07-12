@@ -1,0 +1,13 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname']
+  receiver: 'telegram'
+
+receivers:
+  - name: 'telegram'
+    telegram_configs:
+      - bot_token: "${TELEGRAM_API_KEY}"
+        chat_id: "${TELEGRAM_CHAT_ID}"
+        message: "{{ .CommonAnnotations.summary }}"
