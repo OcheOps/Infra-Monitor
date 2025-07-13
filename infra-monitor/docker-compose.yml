@@ -5,9 +5,6 @@ services:
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
       - ./alerts/rules.yml:/etc/prometheus/rules.yml
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--web.enable-lifecycle'
     ports:
       - 9090:9090
 
@@ -42,6 +39,28 @@ services:
     image: prom/blackbox-exporter:latest
     ports:
       - 9115:9115
+
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+
+  fluentbit:
+    image: cr.fluentbit.io/fluent/fluent-bit:latest
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./config/fluentbit.conf:/fluent-bit/etc/fluent-bit.conf
+    depends_on:
+      - loki
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+      - "4317:4317"
 
 volumes:
   grafana-storage:
