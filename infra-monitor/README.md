@@ -41,4 +41,4 @@ TELEGRAM_CHAT_ID=your_chat_id
 
 ---
 
-MIT License · Built for DevOps by Devs 🚀
+MIT License · Built for DevOps by Oche 🚀
