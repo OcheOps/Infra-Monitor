@@ -1,0 +1,5 @@
+infra-monitor/.env
+infra-monitor/config/alertmanager.yml
+infra-monitor-pkg/
+*.deb
+*.rpm

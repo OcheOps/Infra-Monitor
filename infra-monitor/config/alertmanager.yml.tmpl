@@ -7,5 +7,5 @@ receivers:
   - name: 'telegram'
     telegram_configs:
       - bot_token: "${TELEGRAM_API_KEY}"
-        chat_id: "${TELEGRAM_CHAT_ID}"
+        chat_id: ${TELEGRAM_CHAT_ID}
         message: "{{ .CommonAnnotations.summary }}"
