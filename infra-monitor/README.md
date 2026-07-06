@@ -1,44 +1,64 @@
-# Infra Monitor as a Service 🚨📊
+# Infra Monitor as a Service
 
 A one-liner self-hosted observability stack that gives you:
 - **Metrics** (Prometheus + Node Exporter)
+- **Container metrics** (cAdvisor)
 - **Logs** (Fluent Bit + Loki)
 - **Traces** (Jaeger)
 - **Dashboards** (Grafana)
-- **Alerts** (via Alertmanager & Telegram)
+- **Alerts** (Alertmanager → Telegram)
 
 ---
 
-## 🛠 Requirements
-- Docker
-- Docker Compose
+## Requirements
+- Docker + Docker Compose plugin
+- `envsubst` (part of `gettext`)
 
-## ⚡ Setup
+## First run
 ```bash
-chmod +x setup.sh
-./setup.sh
+./setup.sh          # creates .env from .env.example on first run
+# edit infra-monitor/.env with your Telegram bot token and chat id
+./setup.sh          # renders alertmanager config and starts the stack
 ```
 
-Once deployed:
-- Grafana: `http://localhost:3000` (admin/admin)
-- Prometheus: `http://localhost:9090`
-- Alertmanager: `http://localhost:9093`
-- Jaeger: `http://localhost:16686`
-- Loki (logs via Grafana Explore): `http://localhost:3100`
-
-## 📦 Build as .deb or .rpm
+## Day-to-day
+From `infra-monitor/`:
 ```bash
-make deb       # For Debian/Ubuntu
-make rpm       # For Fedora/RedHat
-make install   # Auto-detect distro and install
+make up       # docker compose up -d
+make down     # docker compose down
+make logs     # tail all logs
+make restart  # restart all services
+make status   # docker compose ps
 ```
 
-Set your Telegram `.env` values:
+## Endpoints
+By default every port is bound to `127.0.0.1`. To expose on the LAN drop a
+`docker-compose.override.yml` next to `docker-compose.yml` and re-publish the
+port you need.
+
+| Service      | URL                              |
+|--------------|----------------------------------|
+| Grafana      | http://localhost:3000 (admin/admin) |
+| Prometheus   | http://localhost:9090            |
+| Alertmanager | http://localhost:9093            |
+| Jaeger       | http://localhost:16686           |
+| Loki         | http://localhost:3100            |
+| cAdvisor     | http://localhost:8080            |
+
+## Package as .deb / .rpm
+```bash
+make deb       # Debian/Ubuntu
+make rpm       # Fedora/RHEL (needs fpm)
+make install   # auto-detect distro and install
 ```
-TELEGRAM_API_KEY=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-```
+
+## Configuration
+- `.env` — Telegram credentials (never committed).
+- `config/alertmanager.yml.tmpl` — template; `setup.sh` renders it to
+  `alertmanager.yml` using values from `.env`.
+- `config/prometheus.yml`, `config/fluentbit.conf`, `alerts/rules.yml` — edit
+  directly and `make restart`.
 
 ---
 
-MIT License · Built for DevOps by Oche 🚀
+MIT License · Built for DevOps by Oche
