@@ -18,9 +18,13 @@ services:
     image: prom/prometheus:v2.54.1
     <<: *restart
     networks: [monitor]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-360h}
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
-      - ./alerts/rules.yml:/etc/prometheus/rules.yml:ro,z
+      - ./alerts:/etc/prometheus/rules:ro,z
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:9090:9090"
@@ -78,8 +82,9 @@ services:
     image: grafana/loki:3.1.1
     <<: *restart
     networks: [monitor]
-    command: -config.file=/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/loki.yaml
     volumes:
+      - ./config/loki.yaml:/etc/loki/loki.yaml:ro,z
       - loki-data:/loki
     ports:
       - "127.0.0.1:3100:3100"
@@ -101,16 +106,14 @@ services:
       - loki
 
   jaeger:
-    image: jaegertracing/all-in-one:1.60
+    image: jaegertracing/jaeger:2.5.0
     <<: *restart
     networks: [monitor]
+    # Named volumes are created root-owned; run as root so Badger can write.
     user: root
-    environment:
-      - SPAN_STORAGE_TYPE=badger
-      - BADGER_EPHEMERAL=false
-      - BADGER_DIRECTORY_VALUE=/badger/data
-      - BADGER_DIRECTORY_KEY=/badger/key
+    command: --config=/etc/jaeger/config.yaml
     volumes:
+      - ./config/jaeger.yaml:/etc/jaeger/config.yaml:ro,z
       - jaeger-data:/badger
     ports:
       - "127.0.0.1:16686:16686"

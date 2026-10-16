@@ -1,0 +1,52 @@
+# Builds release binaries and packages when a v* tag is pushed
+# (see .github/workflows/release.yml). Try it locally with `make snapshot`.
+version: 2
+project_name: infra-monitor
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: infra-monitor
+    main: ./cmd/infra-monitor
+    binary: infra-monitor
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [README.md, LICENSE]
+
+nfpms:
+  - id: packages
+    package_name: infra-monitor
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: OcheOps
+    homepage: https://github.com/OcheOps/Infra-Monitor
+    maintainer: Oche <gideon.david2015@gmail.com>
+    description: Self-hosted observability stack (Prometheus, Grafana, Loki, Jaeger) for Docker Compose and Kubernetes.
+    license: MIT
+    formats: [deb, rpm]
+    bindir: /usr/bin
+    recommends: [docker-ce, kubectl]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:", "^ci:"]
+
+release:
+  draft: false
+  prerelease: auto

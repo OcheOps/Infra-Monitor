@@ -50,7 +50,7 @@ spec:
     spec:
       containers:
         - name: alertmanager
-          image: {{ .Images.alertmanager }}
+          image: {{ index .Images "alertmanager" }}
           args:
             - --config.file=/etc/alertmanager/alertmanager.yml
             - --storage.path=/alertmanager
@@ -61,6 +61,12 @@ spec:
             httpGet:
               path: /-/ready
               port: http
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
           volumeMounts:
             - name: config
               mountPath: /etc/alertmanager

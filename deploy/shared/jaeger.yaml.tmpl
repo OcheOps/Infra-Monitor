@@ -1,0 +1,42 @@
+# Jaeger v2 (an OpenTelemetry Collector distribution) with Badger storage.
+service:
+  extensions: [jaeger_storage, jaeger_query]
+  pipelines:
+    traces:
+      receivers: [otlp, jaeger]
+      processors: [batch]
+      exporters: [jaeger_storage_exporter]
+extensions:
+  jaeger_query:
+    storage:
+      traces: badger_store
+    http:
+      endpoint: 0.0.0.0:16686
+    grpc:
+      endpoint: 0.0.0.0:16685
+  jaeger_storage:
+    backends:
+      badger_store:
+        badger:
+          directories:
+            keys: /badger/key
+            values: /badger/data
+          ephemeral: false
+          ttl:
+            spans: {{ .Retention.Traces }}h
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  jaeger:
+    protocols:
+      thrift_http:
+        endpoint: 0.0.0.0:14268
+processors:
+  batch: {}
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: badger_store

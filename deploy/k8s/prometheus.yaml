@@ -51,8 +51,20 @@ metadata:
 data:
   prometheus.yml: |
 {{ indent 4 .Files.prometheus }}
-  rules.yml: |
-{{ indent 4 .Files.rules }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: infra-monitor
+data:
+{{- range $name, $body := .Rules }}
+  {{ $name }}: |
+{{ indent 4 $body }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -100,11 +112,11 @@ spec:
         fsGroup: 65534
       containers:
         - name: prometheus
-          image: {{ .Images.prometheus }}
+          image: {{ index .Images "prometheus" }}
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
-            - --storage.tsdb.retention.time=15d
+            - --storage.tsdb.retention.time={{ .Retention.Metrics }}h
           ports:
             - name: http
               containerPort: 9090
@@ -112,15 +124,26 @@ spec:
             httpGet:
               path: /-/ready
               port: http
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus
+            - name: rules
+              mountPath: /etc/prometheus/rules
             - name: data
               mountPath: /prometheus
       volumes:
         - name: config
           configMap:
             name: prometheus-config
+        - name: rules
+          configMap:
+            name: prometheus-rules
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -131,4 +154,4 @@ spec:
 {{- end }}
         resources:
           requests:
-            storage: 10Gi
+            storage: {{ .Storage.Prometheus }}
