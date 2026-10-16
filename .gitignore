@@ -1,5 +1,5 @@
 /bin/
-infra-monitor-pkg/
+/dist/
 *.deb
 *.rpm
 .env

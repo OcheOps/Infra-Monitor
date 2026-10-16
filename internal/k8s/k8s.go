@@ -6,14 +6,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path"
 	"regexp"
-	"sort"
 	"strings"
 	"text/template"
 
@@ -29,6 +26,7 @@ var manifests = []string{
 	"alertmanager.yaml",
 	"grafana.yaml",
 	"node-exporter.yaml",
+	"kube-state-metrics.yaml",
 	"blackbox.yaml",
 	"loki.yaml",
 	"fluent-bit.yaml",
@@ -45,107 +43,146 @@ var Ports = map[string]int{
 }
 
 type Options struct {
-	Namespace    string
-	StorageClass string
 	// SkipNamespace leaves the Namespace object out, so deleting the
 	// rendered objects keeps the namespace and its PersistentVolumeClaims.
 	SkipNamespace bool
 }
 
-var (
-	dnsLabelRe     = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
-	storageClassRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
-)
+type dashboard struct {
+	ConfigMap string // ConfigMap name
+	Key       string // file name inside the ConfigMap
+	Body      string
+}
 
-func (o Options) Validate() error {
-	if !dnsLabelRe.MatchString(o.Namespace) {
-		return fmt.Errorf("invalid namespace %q: must be a DNS-1123 label", o.Namespace)
+var nonDNS = regexp.MustCompile(`[^a-z0-9-]+`)
+
+// dashboardConfigMap derives a valid ConfigMap name from a dashboard file name.
+func dashboardConfigMap(file string) string {
+	n := nonDNS.ReplaceAllString(strings.ToLower(strings.TrimSuffix(file, ".json")), "-")
+	n = strings.Trim(n, "-")
+	sum := sha256.Sum256([]byte(file))
+	// The hash keeps names unique when two files differ only in characters
+	// that were replaced.
+	name := "grafana-dashboard-" + n
+	if len(name) > 230 {
+		name = name[:230]
 	}
-	if o.StorageClass != "" && !storageClassRe.MatchString(o.StorageClass) {
-		return fmt.Errorf("invalid storage class %q", o.StorageClass)
+	return name + "-" + hex.EncodeToString(sum[:])[:6]
+}
+
+// DashboardConfigMaps returns the names of the dashboard ConfigMaps Render
+// creates, so stale ones can be pruned.
+func DashboardConfigMaps(extras stack.Extras) ([]string, error) {
+	files, err := stack.Dashboards(extras)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	var names []string
+	for _, name := range stack.SortedKeys(files) {
+		names = append(names, dashboardConfigMap(name))
+	}
+	return names, nil
 }
 
 // Render returns all manifests as one multi-document YAML stream.
-func Render(cfg config.Config, opts Options) ([]byte, error) {
-	if err := opts.Validate(); err != nil {
+func Render(cfg config.Config, extras stack.Extras, opts Options) ([]byte, error) {
+	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	funcs := template.FuncMap{
-		"indent": indent,
-		// JSON strings are valid YAML double-quoted scalars.
-		"quote": func(s string) (string, error) {
-			b, err := json.Marshal(s)
-			return string(b), err
-		},
+	d, err := stack.NewData(cfg)
+	if err != nil {
+		return nil, err
 	}
 
-	read := func(p string) (string, error) {
-		b, err := deploy.FS.ReadFile(p)
-		return string(b), err
-	}
 	files := map[string]string{}
-	for key, p := range map[string]string{
-		"rules":       "shared/alerts/rules.yml",
-		"datasources": "shared/grafana/datasources/datasources.yml",
-		"fluentbit":   "k8s/fluent-bit.conf",
+	add := func(key string, b []byte, err error) error {
+		if err != nil {
+			return fmt.Errorf("rendering %s: %w", key, err)
+		}
+		files[key] = string(b)
+		return nil
+	}
+	read := func(p string) ([]byte, error) { return deploy.FS.ReadFile(p) }
+
+	for _, step := range []func() error{
+		func() error { b, err := stack.PrometheusConfig(stack.Kubernetes, d); return add("prometheus", b, err) },
+		func() error { b, err := stack.AlertmanagerConfig(cfg); return add("alertmanager", b, err) },
+		func() error { b, err := stack.LokiConfig(d); return add("loki", b, err) },
+		func() error { b, err := stack.JaegerConfig(d); return add("jaeger", b, err) },
+		func() error {
+			b, err := read("shared/grafana/datasources/datasources.yml")
+			return add("datasources", b, err)
+		},
+		func() error {
+			b, err := read("shared/grafana/dashboards/dashboard.yml")
+			return add("dashboardProvider", b, err)
+		},
+		func() error { b, err := read("k8s/fluent-bit.conf"); return add("fluentbit", b, err) },
 	} {
-		s, err := read(p)
-		if err != nil {
+		if err := step(); err != nil {
 			return nil, err
 		}
-		files[key] = s
 	}
-	am, err := stack.AlertmanagerConfig(cfg)
+
+	ruleFiles, err := stack.Rules(stack.Kubernetes, extras)
 	if err != nil {
 		return nil, err
 	}
-	files["alertmanager"] = string(am)
+	rules := map[string]string{}
+	for k, v := range ruleFiles {
+		rules[k] = string(v)
+	}
 
-	promTmpl, err := read("k8s/prometheus.yml")
+	dashFiles, err := stack.Dashboards(extras)
 	if err != nil {
 		return nil, err
 	}
-	var prom bytes.Buffer
-	if err := template.Must(template.New("prometheus.yml").Parse(promTmpl)).Execute(&prom, opts); err != nil {
-		return nil, err
+	var dashboards []dashboard
+	var dashSum []string
+	for _, name := range stack.SortedKeys(dashFiles) {
+		dashboards = append(dashboards, dashboard{ConfigMap: dashboardConfigMap(name), Key: name, Body: string(dashFiles[name])})
+		dashSum = append(dashSum, name, string(dashFiles[name]))
 	}
-	files["prometheus"] = prom.String()
-
-	dashboards := map[string]string{}
-	entries, err := fs.ReadDir(deploy.FS, "shared/grafana/dashboards")
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range entries {
-		s, err := read(path.Join("shared/grafana/dashboards", e.Name()))
-		if err != nil {
-			return nil, err
-		}
-		dashboards[e.Name()] = s
+	var ruleSum []string
+	for _, name := range stack.SortedKeys(ruleFiles) {
+		ruleSum = append(ruleSum, name, rules[name])
 	}
 
-	var dashAll []string
-	for _, k := range sortedKeys(dashboards) {
-		dashAll = append(dashAll, k, dashboards[k])
+	k := cfg.Kubernetes
+	tlsSecret := k.Ingress.TLSSecret
+	if tlsSecret == "" && k.Ingress.ClusterIssuer != "" {
+		tlsSecret = "grafana-tls" // created by cert-manager
 	}
+	scheme := "http"
+	if tlsSecret != "" {
+		scheme = "https"
+	}
+
 	data := map[string]any{
-		"Namespace":       opts.Namespace,
-		"StorageClass":    opts.StorageClass,
-		"Images":          stack.Images,
-		"Files":           files,
-		"Dashboards":      dashboards,
-		"GrafanaPassword": cfg.GrafanaPassword,
+		"Namespace":        k.Namespace,
+		"StorageClass":     k.StorageClass,
+		"Storage":          k.Storage,
+		"Ingress":          k.Ingress,
+		"IngressTLSSecret": tlsSecret,
+		"IngressScheme":    scheme,
+		"Retention":        d.Retention,
+		"Images":           stack.Images,
+		"Files":            files,
+		"Rules":            rules,
+		"Dashboards":       dashboards,
+		"GrafanaPassword":  cfg.Grafana.AdminPassword,
 		// Pod-template annotations, so config changes roll the pods.
 		"Checksums": map[string]string{
-			"prometheus":   checksum(files["prometheus"], files["rules"]),
+			"prometheus":   checksum(append([]string{files["prometheus"]}, ruleSum...)...),
 			"alertmanager": checksum(files["alertmanager"]),
-			"grafana":      checksum(append([]string{files["datasources"], cfg.GrafanaPassword}, dashAll...)...),
+			"grafana":      checksum(append([]string{files["datasources"], files["dashboardProvider"], cfg.Grafana.AdminPassword, scheme, k.Ingress.Host}, dashSum...)...),
 			"fluentbit":    checksum(files["fluentbit"]),
+			"loki":         checksum(files["loki"]),
+			"jaeger":       checksum(files["jaeger"]),
 		},
 	}
 
+	funcs := template.FuncMap{"indent": indent, "q": stack.Quote}
 	var out bytes.Buffer
 	for _, name := range manifests {
 		if opts.SkipNamespace && name == "namespace.yaml" {
@@ -155,7 +192,7 @@ func Render(cfg config.Config, opts Options) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		t, err := template.New(name).Funcs(funcs).Option("missingkey=error").Parse(src)
+		t, err := template.New(name).Funcs(funcs).Option("missingkey=error").Parse(string(src))
 		if err != nil {
 			return nil, err
 		}
@@ -188,15 +225,6 @@ func checksum(parts ...string) string {
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
-}
-
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // Kubectl builds a kubectl invocation, optionally against a specific context.

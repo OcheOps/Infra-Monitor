@@ -1,5 +1,6 @@
-// Package config reads and writes the CLI's .env file, which holds the
-// credentials shared by the Compose and Kubernetes backends.
+// Package config holds the user's settings: what to monitor, where to send
+// alerts, retention, and Kubernetes options. It is stored as YAML in the
+// working directory and shared by the Compose and Kubernetes backends.
 package config
 
 import (
@@ -8,127 +9,433 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/mail"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
-const (
-	KeyTelegramToken   = "TELEGRAM_API_KEY"
-	KeyTelegramChatID  = "TELEGRAM_CHAT_ID"
-	KeyGrafanaPassword = "GRAFANA_ADMIN_PASSWORD"
-)
+// FileName is the config file inside the working directory.
+const FileName = "config.yaml"
 
 type Config struct {
-	TelegramToken   string
-	TelegramChatID  string
-	GrafanaPassword string
+	Grafana       Grafana       `yaml:"grafana"`
+	Probes        []string      `yaml:"probes,omitempty"`
+	Targets       []Target      `yaml:"targets,omitempty"`
+	Notifications Notifications `yaml:"notifications,omitempty"`
+	Retention     Retention     `yaml:"retention"`
+	Kubernetes    Kubernetes    `yaml:"kubernetes"`
 }
 
-var (
-	telegramTokenRe = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]+$`)
-	// Values matching this are written unquoted; anything else is single-quoted.
-	plainValueRe = regexp.MustCompile(`^[A-Za-z0-9_:.,/+@=-]*$`)
-)
+type Grafana struct {
+	AdminPassword string `yaml:"admin_password"`
+}
 
-// ErrNotFound is returned by Load when the .env file does not exist.
+// Target is an extra Prometheus scrape target, such as a node exporter on
+// another host or an application's /metrics endpoint.
+type Target struct {
+	Name    string `yaml:"name"`
+	Address string `yaml:"address"`
+	Path    string `yaml:"path,omitempty"`
+}
+
+type Notifications struct {
+	Telegram *Telegram `yaml:"telegram,omitempty"`
+	Slack    *Slack    `yaml:"slack,omitempty"`
+	Email    *Email    `yaml:"email,omitempty"`
+	Webhook  *Webhook  `yaml:"webhook,omitempty"`
+}
+
+type Telegram struct {
+	BotToken string `yaml:"bot_token"`
+	ChatID   string `yaml:"chat_id"`
+}
+
+type Slack struct {
+	WebhookURL string `yaml:"webhook_url"`
+	Channel    string `yaml:"channel,omitempty"`
+}
+
+type Email struct {
+	To        string `yaml:"to"`
+	From      string `yaml:"from"`
+	Smarthost string `yaml:"smarthost"`
+	Username  string `yaml:"username,omitempty"`
+	Password  string `yaml:"password,omitempty"`
+}
+
+type Webhook struct {
+	URL string `yaml:"url"`
+}
+
+// Retention values are durations like 15d, 72h or 2w.
+type Retention struct {
+	Metrics string `yaml:"metrics"`
+	Logs    string `yaml:"logs"`
+	Traces  string `yaml:"traces"`
+}
+
+type Kubernetes struct {
+	Namespace    string  `yaml:"namespace"`
+	Context      string  `yaml:"context,omitempty"`
+	StorageClass string  `yaml:"storage_class,omitempty"`
+	Storage      Storage `yaml:"storage"`
+	Ingress      Ingress `yaml:"ingress,omitempty"`
+}
+
+type Storage struct {
+	Prometheus string `yaml:"prometheus"`
+	Loki       string `yaml:"loki"`
+	Jaeger     string `yaml:"jaeger"`
+	Grafana    string `yaml:"grafana"`
+}
+
+// Ingress exposes Grafana through an Ingress when Host is set.
+type Ingress struct {
+	Host          string `yaml:"host,omitempty"`
+	ClassName     string `yaml:"class_name,omitempty"`
+	TLSSecret     string `yaml:"tls_secret,omitempty"`
+	ClusterIssuer string `yaml:"cluster_issuer,omitempty"`
+}
+
+// Default returns a config with every optional field at its default.
+func Default() Config {
+	var c Config
+	c.ApplyDefaults()
+	return c
+}
+
+// ApplyDefaults fills empty fields with their defaults.
+func (c *Config) ApplyDefaults() {
+	set := func(p *string, v string) {
+		if *p == "" {
+			*p = v
+		}
+	}
+	set(&c.Retention.Metrics, "15d")
+	set(&c.Retention.Logs, "30d")
+	set(&c.Retention.Traces, "3d")
+	set(&c.Kubernetes.Namespace, "infra-monitor")
+	set(&c.Kubernetes.Storage.Prometheus, "10Gi")
+	set(&c.Kubernetes.Storage.Loki, "10Gi")
+	set(&c.Kubernetes.Storage.Jaeger, "5Gi")
+	set(&c.Kubernetes.Storage.Grafana, "1Gi")
+}
+
+// ErrNotFound is returned by Load when no config exists yet.
 var ErrNotFound = errors.New("config not found")
 
-// Load parses a KEY=VALUE env file. Process environment variables with the
-// same names take precedence over values in the file.
-func Load(path string) (Config, error) {
+// Path returns the config file path inside dir.
+func Path(dir string) string { return filepath.Join(dir, FileName) }
+
+// Load reads dir/config.yaml. If it is missing but a .env file from an older
+// version exists, the .env is imported, saved as config.yaml and renamed.
+func Load(dir string) (Config, error) {
 	var c Config
-	f, err := os.Open(path)
+	data, err := os.ReadFile(Path(dir))
 	if errors.Is(err, os.ErrNotExist) {
-		return c, fmt.Errorf("%w: %s (run `infra-monitor init` first)", ErrNotFound, path)
+		if c, ok, err := migrateEnv(dir); ok || err != nil {
+			return c, err
+		}
+		return Default(), fmt.Errorf("%w: %s (run `infra-monitor init` first)", ErrNotFound, Path(dir))
 	}
 	if err != nil {
 		return c, err
 	}
-	defer f.Close()
+	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
+		return c, fmt.Errorf("%s: %w", Path(dir), err)
+	}
+	c.ApplyDefaults()
+	return c, nil
+}
 
+// migrateEnv imports the KEY=VALUE .env file written by earlier versions.
+func migrateEnv(dir string) (Config, bool, error) {
+	envPath := filepath.Join(dir, ".env")
+	f, err := os.Open(envPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return Config{}, false, nil
+	}
+	if err != nil {
+		return Config{}, false, err
+	}
 	vals := map[string]string{}
 	sc := bufio.NewScanner(f)
-	for n := 1; sc.Scan(); n++ {
+	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			return c, fmt.Errorf("%s:%d: expected KEY=VALUE", path, n)
+		if k, v, ok := strings.Cut(line, "="); ok {
+			v = strings.TrimSpace(v)
+			if len(v) >= 2 && (v[0] == '\'' || v[0] == '"') && v[len(v)-1] == v[0] {
+				v = v[1 : len(v)-1]
+			}
+			vals[strings.TrimSpace(k)] = v
 		}
-		vals[strings.TrimSpace(k)] = unquote(strings.TrimSpace(v))
 	}
+	f.Close()
 	if err := sc.Err(); err != nil {
-		return c, err
+		return Config{}, false, err
 	}
-	for _, k := range []string{KeyTelegramToken, KeyTelegramChatID, KeyGrafanaPassword} {
-		if v, ok := os.LookupEnv(k); ok {
-			vals[k] = v
-		}
-	}
-	c.TelegramToken = vals[KeyTelegramToken]
-	c.TelegramChatID = vals[KeyTelegramChatID]
-	c.GrafanaPassword = vals[KeyGrafanaPassword]
-	return c, nil
-}
 
-func unquote(v string) string {
-	if len(v) >= 2 && (v[0] == '\'' || v[0] == '"') && v[len(v)-1] == v[0] {
-		return v[1 : len(v)-1]
+	c := Default()
+	c.Grafana.AdminPassword = vals["GRAFANA_ADMIN_PASSWORD"]
+	if tok, chat := vals["TELEGRAM_API_KEY"], vals["TELEGRAM_CHAT_ID"]; tok != "" || chat != "" {
+		c.Notifications.Telegram = &Telegram{BotToken: tok, ChatID: chat}
 	}
-	return v
-}
-
-func quote(v string) string {
-	if plainValueRe.MatchString(v) {
-		return v
+	if err := c.Save(dir); err != nil {
+		return c, true, err
 	}
-	return "'" + v + "'"
+	return c, true, os.Rename(envPath, envPath+".migrated")
 }
 
 // Save writes the config with owner-only permissions, since it holds secrets.
-func (c Config) Save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+func (c Config) Save(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	var b strings.Builder
-	b.WriteString("# infra-monitor configuration. Holds secrets: keep it private.\n")
-	b.WriteString("# Leave the Telegram values empty to run without alert notifications.\n")
-	fmt.Fprintf(&b, "%s=%s\n", KeyTelegramToken, quote(c.TelegramToken))
-	fmt.Fprintf(&b, "%s=%s\n", KeyTelegramChatID, quote(c.TelegramChatID))
-	fmt.Fprintf(&b, "%s=%s\n", KeyGrafanaPassword, quote(c.GrafanaPassword))
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	data, err := yaml.Marshal(c)
+	if err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600)
+	header := "# infra-monitor configuration. Holds secrets: keep it private.\n" +
+		"# Edit with `infra-monitor init`, `probes`, `targets` and `notify`, or by hand.\n"
+	p := Path(dir)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, append([]byte(header), data...), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
 }
 
-// TelegramEnabled reports whether alert notifications should go to Telegram.
-func (c Config) TelegramEnabled() bool {
-	return c.TelegramToken != "" || c.TelegramChatID != ""
+var (
+	telegramTokenRe = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]+$`)
+	targetNameRe    = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$`)
+	durationRe      = regexp.MustCompile(`^([0-9]+)(h|d|w)$`)
+	quantityRe      = regexp.MustCompile(`^[0-9]+(Mi|Gi|Ti)$`)
+	dnsLabelRe      = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	dnsNameRe       = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
+	hostnameRe      = regexp.MustCompile(`^(\*\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$`)
+	urlPathRe       = regexp.MustCompile(`^/[A-Za-z0-9/_.~-]*$`)
+)
+
+// reservedJobs are scrape job names the stack already uses.
+var reservedJobs = map[string]bool{
+	"prometheus": true, "node": true, "cadvisor": true, "alertmanager": true,
+	"blackbox": true, "blackbox-tcp": true, "kubelet": true, "pods": true,
+	"kube-state-metrics": true,
 }
 
+// Validate checks every field and returns all problems at once.
 func (c Config) Validate() error {
 	var errs []error
-	if c.TelegramEnabled() {
-		if !telegramTokenRe.MatchString(c.TelegramToken) {
-			errs = append(errs, fmt.Errorf("%s must look like 123456:ABC-xyz (from @BotFather)", KeyTelegramToken))
+	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
+
+	switch {
+	case c.Grafana.AdminPassword == "":
+		add("grafana.admin_password is empty")
+	case strings.ContainsAny(c.Grafana.AdminPassword, "\n\r$'\\"):
+		add("grafana.admin_password must not contain quotes, backslashes, '$' or newlines")
+	}
+
+	seen := map[string]bool{}
+	for _, p := range c.Probes {
+		if err := ValidateProbe(p); err != nil {
+			errs = append(errs, err)
 		}
-		if _, err := strconv.ParseInt(c.TelegramChatID, 10, 64); err != nil {
-			errs = append(errs, fmt.Errorf("%s must be a numeric chat id", KeyTelegramChatID))
+		if seen[p] {
+			add("probe %s is listed twice", p)
+		}
+		seen[p] = true
+	}
+	names := map[string]bool{}
+	for _, t := range c.Targets {
+		if err := t.Validate(); err != nil {
+			errs = append(errs, err)
+		}
+		if names[t.Name] {
+			add("target name %q is used twice", t.Name)
+		}
+		names[t.Name] = true
+	}
+
+	n := c.Notifications
+	if t := n.Telegram; t != nil {
+		if !telegramTokenRe.MatchString(t.BotToken) {
+			add("telegram bot token must look like 123456:ABC-xyz (from @BotFather)")
+		}
+		if _, err := strconv.ParseInt(t.ChatID, 10, 64); err != nil {
+			add("telegram chat id must be a number")
 		}
 	}
-	switch {
-	case c.GrafanaPassword == "":
-		errs = append(errs, fmt.Errorf("%s is empty", KeyGrafanaPassword))
-	case strings.ContainsAny(c.GrafanaPassword, "'\n\r"):
-		errs = append(errs, fmt.Errorf("%s must not contain quotes or newlines", KeyGrafanaPassword))
+	if s := n.Slack; s != nil {
+		if err := validateHTTPURL(s.WebhookURL, true); err != nil {
+			add("slack webhook url: %v", err)
+		}
+	}
+	if e := n.Email; e != nil {
+		for _, a := range []struct{ name, v string }{{"to", e.To}, {"from", e.From}} {
+			if _, err := mail.ParseAddress(a.v); err != nil {
+				add("email %s address %q is invalid", a.name, a.v)
+			}
+		}
+		if _, port, err := net.SplitHostPort(e.Smarthost); err != nil || port == "" {
+			add("email smarthost must be host:port, e.g. smtp.gmail.com:587")
+		}
+	}
+	if w := n.Webhook; w != nil {
+		if err := validateHTTPURL(w.URL, false); err != nil {
+			add("webhook url: %v", err)
+		}
+	}
+
+	for _, r := range []struct{ name, v string }{
+		{"metrics", c.Retention.Metrics}, {"logs", c.Retention.Logs}, {"traces", c.Retention.Traces},
+	} {
+		if _, err := Hours(r.v); err != nil {
+			add("retention.%s: %v", r.name, err)
+		}
+	}
+
+	k := c.Kubernetes
+	if !dnsLabelRe.MatchString(k.Namespace) {
+		add("kubernetes.namespace %q must be a DNS-1123 label", k.Namespace)
+	}
+	if k.StorageClass != "" && !dnsNameRe.MatchString(k.StorageClass) {
+		add("kubernetes.storage_class %q is invalid", k.StorageClass)
+	}
+	for _, s := range []struct{ name, v string }{
+		{"prometheus", k.Storage.Prometheus}, {"loki", k.Storage.Loki},
+		{"jaeger", k.Storage.Jaeger}, {"grafana", k.Storage.Grafana},
+	} {
+		if !quantityRe.MatchString(s.v) {
+			add("kubernetes.storage.%s %q must look like 10Gi or 500Mi", s.name, s.v)
+		}
+	}
+	if in := k.Ingress; in.Host != "" {
+		if !hostnameRe.MatchString(in.Host) {
+			add("kubernetes.ingress.host %q is not a valid hostname", in.Host)
+		}
+		for _, f := range []struct{ name, v string }{
+			{"class_name", in.ClassName}, {"tls_secret", in.TLSSecret}, {"cluster_issuer", in.ClusterIssuer},
+		} {
+			if f.v != "" && !dnsNameRe.MatchString(f.v) {
+				add("kubernetes.ingress.%s %q is invalid", f.name, f.v)
+			}
+		}
+	} else if in.TLSSecret != "" || in.ClusterIssuer != "" || in.ClassName != "" {
+		add("kubernetes.ingress settings need a host")
 	}
 	return errors.Join(errs...)
+}
+
+// ValidateProbe checks a URL for the Blackbox exporter: http(s)://... for
+// HTTP checks or tcp://host:port for TCP connect checks.
+func ValidateProbe(p string) error {
+	u, err := url.Parse(p)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("probe %q: must be a full URL like https://example.com or tcp://db:5432", p)
+	}
+	switch u.Scheme {
+	case "http", "https":
+	case "tcp":
+		if _, port, err := net.SplitHostPort(u.Host); err != nil || port == "" || u.Path != "" {
+			return fmt.Errorf("probe %q: TCP checks need tcp://host:port", p)
+		}
+	default:
+		return fmt.Errorf("probe %q: scheme must be http, https or tcp", p)
+	}
+	if strings.ContainsAny(p, " \"'\n\\") {
+		return fmt.Errorf("probe %q: contains invalid characters", p)
+	}
+	return nil
+}
+
+func (t Target) Validate() error {
+	var errs []error
+	if !targetNameRe.MatchString(t.Name) {
+		errs = append(errs, fmt.Errorf("target name %q: use lowercase letters, digits, '-' or '_'", t.Name))
+	} else if reservedJobs[t.Name] {
+		errs = append(errs, fmt.Errorf("target name %q is used by the stack itself; pick another", t.Name))
+	}
+	host, port, err := net.SplitHostPort(t.Address)
+	if err != nil || host == "" || port == "" || strings.ContainsAny(t.Address, " \"'") {
+		errs = append(errs, fmt.Errorf("target %q address %q must be host:port, e.g. 10.0.0.5:9100", t.Name, t.Address))
+	} else if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		errs = append(errs, fmt.Errorf("target %q port %q is invalid", t.Name, port))
+	}
+	if t.Path != "" && !urlPathRe.MatchString(t.Path) {
+		errs = append(errs, fmt.Errorf("target %q path %q must start with / and contain only URL path characters", t.Name, t.Path))
+	}
+	return errors.Join(errs...)
+}
+
+func validateHTTPURL(s string, httpsOnly bool) error {
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && (httpsOnly || u.Scheme != "http")) {
+		if httpsOnly {
+			return fmt.Errorf("%q must be an https:// URL", s)
+		}
+		return fmt.Errorf("%q must be an http:// or https:// URL", s)
+	}
+	if strings.ContainsAny(s, " \"'\n\\") {
+		return fmt.Errorf("%q contains invalid characters", s)
+	}
+	return nil
+}
+
+// Hours converts a retention duration (e.g. 15d, 72h, 2w) to whole hours.
+func Hours(d string) (int, error) {
+	m := durationRe.FindStringSubmatch(d)
+	if m == nil {
+		return 0, fmt.Errorf("%q must be a number followed by h, d or w (e.g. 72h, 15d, 2w)", d)
+	}
+	n, _ := strconv.Atoi(m[1])
+	switch m[2] {
+	case "d":
+		n *= 24
+	case "w":
+		n *= 24 * 7
+	}
+	if n < 24 {
+		return 0, fmt.Errorf("%q is shorter than the 24h minimum", d)
+	}
+	return n, nil
+}
+
+// NotificationsEnabled reports whether any alert channel is configured.
+func (c Config) NotificationsEnabled() bool {
+	n := c.Notifications
+	return n.Telegram != nil || n.Slack != nil || n.Email != nil || n.Webhook != nil
+}
+
+// Channels lists the configured notification channels by name.
+func (c Config) Channels() []string {
+	var out []string
+	n := c.Notifications
+	if n.Telegram != nil {
+		out = append(out, "telegram")
+	}
+	if n.Slack != nil {
+		out = append(out, "slack")
+	}
+	if n.Email != nil {
+		out = append(out, "email")
+	}
+	if n.Webhook != nil {
+		out = append(out, "webhook")
+	}
+	return out
 }
 
 // GeneratePassword returns a random 32-character hex password.
