@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: jaeger
+    app.kubernetes.io/part-of: infra-monitor
+spec:
+  selector:
+    app.kubernetes.io/name: jaeger
+  ports:
+    - name: ui
+      port: 16686
+      targetPort: 16686
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: thrift-http
+      port: 14268
+      targetPort: 14268
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: jaeger
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: jaeger
+    app.kubernetes.io/part-of: infra-monitor
+spec:
+  serviceName: jaeger
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jaeger
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jaeger
+        app.kubernetes.io/part-of: infra-monitor
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: jaeger
+          image: {{ .Images.jaeger }}
+          env:
+            - name: SPAN_STORAGE_TYPE
+              value: badger
+            - name: BADGER_EPHEMERAL
+              value: "false"
+            - name: BADGER_DIRECTORY_VALUE
+              value: /badger/data
+            - name: BADGER_DIRECTORY_KEY
+              value: /badger/key
+          ports:
+            - name: ui
+              containerPort: 16686
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: thrift-http
+              containerPort: 14268
+          volumeMounts:
+            - name: data
+              mountPath: /badger
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+{{- with .StorageClass }}
+        storageClassName: {{ . }}
+{{- end }}
+        resources:
+          requests:
+            storage: 5Gi
