@@ -12,7 +12,7 @@ A one-liner self-hosted observability stack that gives you:
 
 ## Requirements
 - Docker + Docker Compose plugin
-- `envsubst` (part of `gettext`)
+- `make` and `envsubst` (part of `gettext`)
 
 ## First run
 ```bash
@@ -21,13 +21,17 @@ A one-liner self-hosted observability stack that gives you:
 ./setup.sh          # renders alertmanager config and starts the stack
 ```
 
+After installing the `.deb`/`.rpm`, there is no `setup.sh`; from
+`/opt/infra-monitor` run `sudo make up` (the first run creates `.env` for you
+to edit).
+
 ## Day-to-day
 From `infra-monitor/`:
 ```bash
-make up       # docker compose up -d
+make up       # render config/alertmanager.yml from .env, then docker compose up -d
 make down     # docker compose down
 make logs     # tail all logs
-make restart  # restart all services
+make restart  # re-render config and restart all services
 make status   # docker compose ps
 ```
 
@@ -54,8 +58,9 @@ make install   # auto-detect distro and install
 
 ## Configuration
 - `.env` — Telegram credentials (never committed).
-- `config/alertmanager.yml.tmpl` — template; `setup.sh` renders it to
-  `alertmanager.yml` using values from `.env`.
+- `config/alertmanager.yml.tmpl` — template; `make up` renders it to
+  `alertmanager.yml` using values from `.env`. The rendered file holds your
+  bot token, so it is git-ignored and left out of `make deb`/`make rpm`.
 - `config/prometheus.yml`, `config/fluentbit.conf`, `alerts/rules.yml` — edit
   directly and `make restart`.
 
