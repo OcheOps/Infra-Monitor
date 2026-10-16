@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - run: make test
+      - run: make build
+      - name: Validate Kubernetes manifests
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+          export INFRA_MONITOR_DIR="$RUNNER_TEMP/im"
+          bin/infra-monitor init
+          bin/infra-monitor k8s render --storage-class standard > "$RUNNER_TEMP/k8s.yaml"
+          "$(go env GOPATH)/bin/kubeconform" -strict -summary -kubernetes-version 1.30.0 "$RUNNER_TEMP/k8s.yaml"
+      - run: make deb
+
+  compose-smoke:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      INFRA_MONITOR_DIR: ${{ runner.temp }}/im
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make build
+      - run: bin/infra-monitor init
+      - run: bin/infra-monitor compose up
+      - name: Wait for scrape targets
+        run: .github/scripts/wait-for-targets.sh "curl -fsS http://localhost:9090/api/v1/targets" node cadvisor alertmanager
+      - name: Grafana is healthy
+        run: curl -fsS http://localhost:3000/api/health
+      - name: Logs on failure
+        if: failure()
+        run: bin/infra-monitor compose status && docker compose -p infra-monitor logs --tail 50
+
+  k8s-smoke:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      INFRA_MONITOR_DIR: ${{ runner.temp }}/im
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: helm/kind-action@v1.10.0
+      - run: make build
+      - run: bin/infra-monitor init
+      - run: bin/infra-monitor k8s apply
+      - name: Wait for rollouts
+        run: |
+          for w in statefulset/prometheus statefulset/grafana statefulset/loki statefulset/jaeger \
+                   deployment/alertmanager deployment/blackbox daemonset/node-exporter daemonset/fluent-bit; do
+            kubectl -n infra-monitor rollout status "$w" --timeout=300s
+          done
+      - name: Wait for scrape targets
+        run: .github/scripts/wait-for-targets.sh "kubectl -n infra-monitor exec prometheus-0 -- wget -qO- http://localhost:9090/api/v1/targets" node kubelet cadvisor alertmanager
+      - name: Logs arrive in Loki
+        run: |
+          for i in $(seq 30); do
+            out=$(kubectl -n infra-monitor exec prometheus-0 -- wget -qO- 'http://loki:3100/loki/api/v1/labels' || true)
+            echo "$out" | grep -q kubernetes_namespace_name && { echo "$out"; exit 0; }
+            sleep 5
+          done
+          echo "no Kubernetes log labels in Loki: $out"; exit 1
+      - name: Debug on failure
+        if: failure()
+        run: |
+          bin/infra-monitor k8s status
+          kubectl -n infra-monitor get events --sort-by=.lastTimestamp | tail -40
+          kubectl -n infra-monitor logs daemonset/fluent-bit --tail 50 || true
