@@ -1,0 +1,17 @@
+# Weekly update PRs for Go modules, GitHub Actions and the pinned stack
+# images in deploy/compose/docker-compose.yml. The Kubernetes manifests read
+# image versions from that file, so one PR updates both backends.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker-compose
+    directory: /deploy/compose
+    schedule:
+      interval: weekly

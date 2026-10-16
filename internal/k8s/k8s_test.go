@@ -10,21 +10,50 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/OcheOps/Infra-Monitor/internal/config"
+	"github.com/OcheOps/Infra-Monitor/internal/stack"
 )
+
+type container struct {
+	Name      string   `yaml:"name"`
+	Image     string   `yaml:"image"`
+	Args      []string `yaml:"args"`
+	Resources struct {
+		Requests map[string]string `yaml:"requests"`
+		Limits   map[string]string `yaml:"limits"`
+	} `yaml:"resources"`
+	Env []struct {
+		Name  string `yaml:"name"`
+		Value string `yaml:"value"`
+	} `yaml:"env"`
+}
 
 type object struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
 	Metadata   struct {
-		Name      string `yaml:"name"`
-		Namespace string `yaml:"namespace"`
+		Name        string            `yaml:"name"`
+		Namespace   string            `yaml:"namespace"`
+		Annotations map[string]string `yaml:"annotations"`
 	} `yaml:"metadata"`
 	Data       map[string]string `yaml:"data"`
 	StringData map[string]string `yaml:"stringData"`
 	Spec       struct {
+		IngressClassName string `yaml:"ingressClassName"`
+		TLS              []struct {
+			Hosts      []string `yaml:"hosts"`
+			SecretName string   `yaml:"secretName"`
+		} `yaml:"tls"`
+		Template struct {
+			Spec struct {
+				Containers []container `yaml:"containers"`
+			} `yaml:"spec"`
+		} `yaml:"template"`
 		VolumeClaimTemplates []struct {
 			Spec struct {
 				StorageClassName string `yaml:"storageClassName"`
+				Resources        struct {
+					Requests map[string]string `yaml:"requests"`
+				} `yaml:"resources"`
 			} `yaml:"spec"`
 		} `yaml:"volumeClaimTemplates"`
 	} `yaml:"spec"`
@@ -32,14 +61,26 @@ type object struct {
 
 var clusterScoped = map[string]bool{"Namespace": true, "ClusterRole": true, "ClusterRoleBinding": true}
 
-func render(t *testing.T, cfg config.Config, opts Options) []object {
+func testConfig() config.Config {
+	c := config.Default()
+	c.Grafana.AdminPassword = `p"w: #x`
+	c.Notifications.Telegram = &config.Telegram{BotToken: "1:a", ChatID: "2"}
+	c.Kubernetes.Namespace = "mon"
+	c.Kubernetes.StorageClass = "fast"
+	c.Kubernetes.Storage.Prometheus = "50Gi"
+	c.Retention.Metrics = "30d"
+	return c
+}
+
+func render(t *testing.T, cfg config.Config, extras stack.Extras, opts Options) map[string]object {
 	t.Helper()
-	out, err := Render(cfg, opts)
+	out, err := Render(cfg, extras, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(out))
-	var objs []object
+	objs := map[string]object{}
+	first := true
 	for {
 		var o object
 		err := dec.Decode(&o)
@@ -49,111 +90,206 @@ func render(t *testing.T, cfg config.Config, opts Options) []object {
 		if err != nil {
 			t.Fatalf("invalid YAML in rendered manifests: %v", err)
 		}
-		objs = append(objs, o)
+		if first && !opts.SkipNamespace && o.Kind != "Namespace" {
+			t.Errorf("first object is %s, want Namespace", o.Kind)
+		}
+		first = false
+		key := o.Kind + "/" + o.Metadata.Name
+		if _, dup := objs[key]; dup {
+			t.Errorf("duplicate object %s", key)
+		}
+		objs[key] = o
 	}
 }
 
 func TestRender(t *testing.T) {
-	cfg := config.Config{TelegramToken: "1:a", TelegramChatID: "2", GrafanaPassword: `p"w: #x`}
-	objs := render(t, cfg, Options{Namespace: "mon", StorageClass: "fast"})
+	cfg := testConfig()
+	objs := render(t, cfg, stack.Extras{}, Options{})
 
-	if objs[0].Kind != "Namespace" || objs[0].Metadata.Name != "mon" {
-		t.Errorf("first object = %s/%s, want Namespace/mon", objs[0].Kind, objs[0].Metadata.Name)
-	}
-	byKey := map[string]object{}
-	for _, o := range objs {
+	for key, o := range objs {
 		if o.APIVersion == "" || o.Kind == "" || o.Metadata.Name == "" {
-			t.Errorf("incomplete object: %+v", o)
-		}
-		if clusterScoped[o.Kind] != (o.Metadata.Namespace == "") {
-			t.Errorf("%s/%s has namespace %q", o.Kind, o.Metadata.Name, o.Metadata.Namespace)
+			t.Errorf("incomplete object %s", key)
 		}
 		if !clusterScoped[o.Kind] && o.Metadata.Namespace != "mon" {
-			t.Errorf("%s/%s in namespace %q, want mon", o.Kind, o.Metadata.Name, o.Metadata.Namespace)
+			t.Errorf("%s in namespace %q, want mon", key, o.Metadata.Namespace)
+		}
+		if clusterScoped[o.Kind] && o.Metadata.Namespace != "" {
+			t.Errorf("cluster-scoped %s has a namespace", key)
 		}
 		for _, v := range o.Spec.VolumeClaimTemplates {
 			if v.Spec.StorageClassName != "fast" {
-				t.Errorf("%s/%s storageClassName = %q", o.Kind, o.Metadata.Name, v.Spec.StorageClassName)
+				t.Errorf("%s storageClassName = %q", key, v.Spec.StorageClassName)
 			}
 		}
-		key := o.Kind + "/" + o.Metadata.Name
-		if _, dup := byKey[key]; dup {
-			t.Errorf("duplicate object %s", key)
+		// Every workload container has requests and a memory limit.
+		for _, c := range o.Spec.Template.Spec.Containers {
+			if c.Resources.Requests["memory"] == "" || c.Resources.Limits["memory"] == "" {
+				t.Errorf("%s container %s has no memory request/limit", key, c.Name)
+			}
+			if c.Image == "" {
+				t.Errorf("%s container %s has no image", key, c.Name)
+			}
 		}
-		byKey[key] = o
 	}
 
 	for _, k := range []string{
 		"StatefulSet/prometheus", "Deployment/alertmanager", "StatefulSet/grafana",
-		"DaemonSet/node-exporter", "Deployment/blackbox", "StatefulSet/loki",
-		"DaemonSet/fluent-bit", "StatefulSet/jaeger", "ClusterRole/mon-prometheus",
+		"DaemonSet/node-exporter", "Deployment/kube-state-metrics", "Deployment/blackbox",
+		"StatefulSet/loki", "DaemonSet/fluent-bit", "StatefulSet/jaeger", "ClusterRole/mon-prometheus",
+		"ClusterRole/mon-kube-state-metrics", "ConfigMap/prometheus-rules", "ConfigMap/loki-config", "ConfigMap/jaeger-config",
 	} {
-		if _, ok := byKey[k]; !ok {
+		if _, ok := objs[k]; !ok {
 			t.Errorf("missing %s", k)
 		}
 	}
+	if _, ok := objs["Ingress/grafana"]; ok {
+		t.Error("Ingress rendered without a host")
+	}
 
-	// Embedded files must survive YAML round-tripping intact.
-	if pw := byKey["Secret/grafana-admin"].StringData["password"]; pw != cfg.GrafanaPassword {
-		t.Errorf("grafana password = %q, want %q", pw, cfg.GrafanaPassword)
+	if pw := objs["Secret/grafana-admin"].StringData["password"]; pw != cfg.Grafana.AdminPassword {
+		t.Errorf("grafana password = %q", pw)
 	}
-	prom := byKey["ConfigMap/prometheus-config"].Data
-	if !strings.Contains(prom["prometheus.yml"], "names: ['mon']") {
-		t.Errorf("prometheus.yml not scoped to namespace:\n%s", prom["prometheus.yml"])
+	if !strings.Contains(objs["ConfigMap/prometheus-config"].Data["prometheus.yml"], "names: ['mon']") {
+		t.Error("prometheus.yml not scoped to the namespace")
 	}
-	if !strings.Contains(prom["rules.yml"], "{{ $labels.instance }}") {
-		t.Error("rules.yml lost its alert templates")
+	rules := objs["ConfigMap/prometheus-rules"].Data
+	if !strings.Contains(rules["rules.yml"], "{{ $labels.instance }}") || rules["kubernetes.yml"] == "" {
+		t.Errorf("rules ConfigMap keys = %v", keys(rules))
 	}
-	if !strings.Contains(byKey["Secret/alertmanager-config"].StringData["alertmanager.yml"], "chat_id: 2") {
+	prom := objs["StatefulSet/prometheus"]
+	if !contains(prom.Spec.Template.Spec.Containers[0].Args, "--storage.tsdb.retention.time=720h") {
+		t.Errorf("prometheus args = %v", prom.Spec.Template.Spec.Containers[0].Args)
+	}
+	if got := prom.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests["storage"]; got != "50Gi" {
+		t.Errorf("prometheus volume = %q", got)
+	}
+	if !strings.Contains(objs["Secret/alertmanager-config"].StringData["alertmanager.yml"], "chat_id: 2") {
 		t.Error("alertmanager config not rendered")
 	}
-	dash := byKey["ConfigMap/grafana-dashboards"].Data
-	for _, k := range []string{"dashboard.yml", "node-exporter-full.json", "cadvisor.json"} {
-		if dash[k] == "" {
-			t.Errorf("dashboards ConfigMap missing %s", k)
+
+	// Dashboards: one ConfigMap each, all under the 1 MiB object limit.
+	n := 0
+	for key, o := range objs {
+		if strings.HasPrefix(key, "ConfigMap/grafana-dashboard-") && key != "ConfigMap/grafana-dashboard-provider" {
+			n++
+			for _, body := range o.Data {
+				if len(body) > 1<<20 {
+					t.Errorf("%s is %d bytes", key, len(body))
+				}
+			}
 		}
+	}
+	if n != 2 {
+		t.Errorf("found %d dashboard ConfigMaps, want 2", n)
 	}
 }
 
-func TestRenderNoStorageClass(t *testing.T) {
-	out, err := Render(config.Config{GrafanaPassword: "x"}, Options{Namespace: "infra-monitor"})
-	if err != nil {
-		t.Fatal(err)
+func TestRenderIngress(t *testing.T) {
+	cfg := testConfig()
+	cfg.Kubernetes.Ingress = config.Ingress{Host: "grafana.example.com", ClassName: "nginx", ClusterIssuer: "letsencrypt"}
+	objs := render(t, cfg, stack.Extras{}, Options{})
+	in, ok := objs["Ingress/grafana"]
+	if !ok {
+		t.Fatal("no Ingress")
 	}
-	if bytes.Contains(out, []byte("storageClassName")) {
-		t.Error("storageClassName set without --storage-class")
+	if in.Spec.IngressClassName != "nginx" || in.Metadata.Annotations["cert-manager.io/cluster-issuer"] != "letsencrypt" {
+		t.Errorf("ingress = %+v", in)
+	}
+	if len(in.Spec.TLS) != 1 || in.Spec.TLS[0].SecretName != "grafana-tls" || in.Spec.TLS[0].Hosts[0] != "grafana.example.com" {
+		t.Errorf("tls = %+v", in.Spec.TLS)
+	}
+	if !hasEnv(objs["StatefulSet/grafana"], "GF_SERVER_ROOT_URL", "https://grafana.example.com/") {
+		t.Error("GF_SERVER_ROOT_URL not set to the https URL")
+	}
+
+	cfg.Kubernetes.Ingress = config.Ingress{Host: "grafana.example.com"}
+	objs = render(t, cfg, stack.Extras{}, Options{})
+	if len(objs["Ingress/grafana"].Spec.TLS) != 0 || !hasEnv(objs["StatefulSet/grafana"], "GF_SERVER_ROOT_URL", "http://grafana.example.com/") {
+		t.Error("plain-HTTP ingress rendered wrongly")
+	}
+}
+
+func TestRenderExtras(t *testing.T) {
+	extras := stack.Extras{
+		Rules:      map[string][]byte{"custom-mine.yml": []byte("groups:\n  - name: mine\n    rules: []\n")},
+		Dashboards: map[string][]byte{"custom-My App.json": []byte(`{"title":"x"}`)},
+	}
+	objs := render(t, testConfig(), extras, Options{})
+	if objs["ConfigMap/prometheus-rules"].Data["custom-mine.yml"] == "" {
+		t.Error("custom rule missing")
+	}
+	names, err := DashboardConfigMaps(extras)
+	if err != nil || len(names) != 3 {
+		t.Fatalf("DashboardConfigMaps = %v, %v", names, err)
+	}
+	for _, n := range names {
+		if _, ok := objs["ConfigMap/"+n]; !ok {
+			t.Errorf("dashboard ConfigMap %s not rendered", n)
+		}
+		if len(n) > 253 || strings.ContainsAny(n, " _ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+			t.Errorf("invalid ConfigMap name %q", n)
+		}
 	}
 }
 
 func TestRenderSkipNamespace(t *testing.T) {
-	for _, o := range render(t, config.Config{}, Options{Namespace: "mon", SkipNamespace: true}) {
-		if o.Kind == "Namespace" {
+	for k := range render(t, testConfig(), stack.Extras{}, Options{SkipNamespace: true}) {
+		if strings.HasPrefix(k, "Namespace/") {
 			t.Error("Namespace rendered with SkipNamespace")
 		}
 	}
 }
 
-func TestOptionsValidate(t *testing.T) {
-	for _, o := range []Options{
-		{Namespace: ""},
-		{Namespace: "Bad_NS"},
-		{Namespace: "ok", StorageClass: "x\ny: z"},
-	} {
-		if o.Validate() == nil {
-			t.Errorf("Validate(%+v) = nil, want error", o)
+func TestConfigChangeRollsPods(t *testing.T) {
+	a, _ := Render(testConfig(), stack.Extras{}, Options{})
+	cfg := testConfig()
+	cfg.Notifications.Telegram.ChatID = "3"
+	cfg.Retention.Logs = "7d"
+	b, _ := Render(cfg, stack.Extras{}, Options{})
+	sum := func(out []byte, kind string) string {
+		i := bytes.Index(out, []byte(kind))
+		j := bytes.Index(out[i:], []byte("checksum/config: "))
+		return string(out[i+j : i+j+40])
+	}
+	for _, kind := range []string{"kind: Deployment\nmetadata:\n  name: alertmanager", "kind: StatefulSet\nmetadata:\n  name: loki"} {
+		if sum(a, kind) == sum(b, kind) {
+			t.Errorf("checksum unchanged after config change for %q", kind)
 		}
 	}
 }
 
-func TestConfigChangeRollsPods(t *testing.T) {
-	a, _ := Render(config.Config{GrafanaPassword: "x"}, Options{Namespace: "n"})
-	b, _ := Render(config.Config{GrafanaPassword: "x", TelegramToken: "1:a", TelegramChatID: "2"}, Options{Namespace: "n"})
-	sum := func(out []byte) string {
-		i := bytes.Index(out, []byte("kind: Deployment\nmetadata:\n  name: alertmanager"))
-		j := bytes.Index(out[i:], []byte("checksum/config: "))
-		return string(out[i+j : i+j+40])
+func TestRenderRejectsInvalidConfig(t *testing.T) {
+	cfg := testConfig()
+	cfg.Kubernetes.Namespace = "Bad_NS"
+	if _, err := Render(cfg, stack.Extras{}, Options{}); err == nil {
+		t.Error("expected validation error")
 	}
-	if sum(a) == sum(b) {
-		t.Error("alertmanager checksum unchanged after config change")
+}
+
+func hasEnv(o object, name, value string) bool {
+	for _, c := range o.Spec.Template.Spec.Containers {
+		for _, e := range c.Env {
+			if e.Name == name && e.Value == value {
+				return true
+			}
+		}
 	}
+	return false
+}
+
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+func keys(m map[string]string) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

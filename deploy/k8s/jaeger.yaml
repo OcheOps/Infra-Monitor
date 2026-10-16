@@ -1,4 +1,16 @@
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jaeger-config
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: jaeger
+    app.kubernetes.io/part-of: infra-monitor
+data:
+  config.yaml: |
+{{ indent 4 .Files.jaeger }}
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: jaeger
@@ -42,6 +54,8 @@ spec:
       labels:
         app.kubernetes.io/name: jaeger
         app.kubernetes.io/part-of: infra-monitor
+      annotations:
+        checksum/config: {{ .Checksums.jaeger }}
     spec:
       securityContext:
         runAsUser: 10001
@@ -49,16 +63,9 @@ spec:
         fsGroup: 10001
       containers:
         - name: jaeger
-          image: {{ .Images.jaeger }}
-          env:
-            - name: SPAN_STORAGE_TYPE
-              value: badger
-            - name: BADGER_EPHEMERAL
-              value: "false"
-            - name: BADGER_DIRECTORY_VALUE
-              value: /badger/data
-            - name: BADGER_DIRECTORY_KEY
-              value: /badger/key
+          image: {{ index .Images "jaeger" }}
+          args:
+            - --config=/etc/jaeger/config.yaml
           ports:
             - name: ui
               containerPort: 16686
@@ -68,9 +75,25 @@ spec:
               containerPort: 4318
             - name: thrift-http
               containerPort: 14268
+          readinessProbe:
+            httpGet:
+              path: /
+              port: ui
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 1Gi
           volumeMounts:
+            - name: config
+              mountPath: /etc/jaeger
             - name: data
               mountPath: /badger
+      volumes:
+        - name: config
+          configMap:
+            name: jaeger-config
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -81,4 +104,4 @@ spec:
 {{- end }}
         resources:
           requests:
-            storage: 5Gi
+            storage: {{ .Storage.Jaeger }}

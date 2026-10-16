@@ -1,0 +1,50 @@
+{{- /* Scrape jobs shared by the Compose and Kubernetes Prometheus configs. */ -}}
+{{- define "common_jobs" }}
+  - job_name: 'alertmanager'
+    static_configs:
+      - targets: ['alertmanager:9093']
+{{- with .HTTPProbes }}
+  - job_name: 'blackbox'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+{{- range . }}
+          - {{ q . }}
+{{- end }}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+{{- end }}
+{{- with .TCPProbes }}
+  - job_name: 'blackbox-tcp'
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    static_configs:
+      - targets:
+{{- range . }}
+          - {{ q . }}
+{{- end }}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+{{- end }}
+{{- range .Targets }}
+  - job_name: {{ q .Name }}
+{{- with .Path }}
+    metrics_path: {{ q . }}
+{{- end }}
+    static_configs:
+      - targets: [{{ q .Address }}]
+{{- end }}
+{{- end }}
