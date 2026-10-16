@@ -8,3 +8,10 @@ groups:
           severity: critical
         annotations:
           summary: "Instance {{ $labels.instance }} is DOWN"
+      - alert: ProbeFailed
+        expr: probe_success == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Probe of {{ $labels.instance }} is FAILING"

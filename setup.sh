@@ -9,6 +9,7 @@ require() {
 
 require docker
 require envsubst
+require make
 docker compose version >/dev/null 2>&1 || { echo -e "${RED}docker compose plugin not found.${NC}"; exit 1; }
 
 cd "$(dirname "$0")/infra-monitor"
@@ -19,11 +20,8 @@ if [ ! -f .env ]; then
   exit 0
 fi
 
-set -a; . ./.env; set +a
-envsubst < config/alertmanager.yml.tmpl > config/alertmanager.yml
-
 echo -e "${YEL}Starting stack…${NC}"
-docker compose up -d
+make up
 
 cat <<EOF
 ${GRN}Infra Monitor is live${NC}
