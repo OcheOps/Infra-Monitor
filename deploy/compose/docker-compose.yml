@@ -11,6 +11,7 @@ volumes:
   prometheus-data:
   loki-data:
   jaeger-data:
+  fluentbit-data:
 
 services:
   prometheus:
@@ -42,7 +43,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?run infra-monitor init}
       - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
     volumes:
       - grafana-data:/var/lib/grafana
@@ -95,6 +96,7 @@ services:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - ./config/fluentbit.conf:/fluent-bit/etc/fluent-bit.conf:ro,z
       - ./config/parsers.conf:/fluent-bit/etc/parsers.conf:ro,z
+      - fluentbit-data:/fluent-bit/db
     depends_on:
       - loki
 
@@ -114,6 +116,7 @@ services:
       - "127.0.0.1:16686:16686"
       - "127.0.0.1:14268:14268"
       - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
 
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1

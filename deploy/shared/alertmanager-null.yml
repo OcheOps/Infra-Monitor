@@ -1,0 +1,6 @@
+# Rendered when no Telegram credentials are configured: alerts are accepted
+# and visible in the Alertmanager UI, but not sent anywhere.
+route:
+  receiver: 'null'
+receivers:
+  - name: 'null'
