@@ -32,9 +32,8 @@ jobs:
   compose-smoke:
     needs: test
     runs-on: ubuntu-latest
-    env:
-      INFRA_MONITOR_DIR: ${{ runner.temp }}/im
     steps:
+      - run: echo "INFRA_MONITOR_DIR=$RUNNER_TEMP/im" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
@@ -53,9 +52,8 @@ jobs:
   k8s-smoke:
     needs: test
     runs-on: ubuntu-latest
-    env:
-      INFRA_MONITOR_DIR: ${{ runner.temp }}/im
     steps:
+      - run: echo "INFRA_MONITOR_DIR=$RUNNER_TEMP/im" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
