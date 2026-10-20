@@ -58,6 +58,11 @@ jobs:
           amtool check-config "$C/config/alertmanager.yml"
           docker compose --project-directory "$C" -f "$C/docker-compose.yml" --env-file "$C/.env" config -q
           docker run --rm -v "$C/gateway:/etc/caddy:ro" caddy:2.8.4-alpine caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile
+          # Also without agents, the case most installs start in.
+          bin/infra-monitor agent remove web-2
+          bin/infra-monitor compose sync
+          docker run --rm -v "$C/gateway:/etc/caddy:ro" caddy:2.8.4-alpine caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile
+          bin/infra-monitor agent add web-2 >/dev/null
           bin/infra-monitor k8s render > k8s.yaml
           kubeconform -strict -summary -kubernetes-version 1.30.0 k8s.yaml
       - name: Shellcheck

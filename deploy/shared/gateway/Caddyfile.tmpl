@@ -42,8 +42,8 @@
 		}
 	}
 }
-
 {{- if .Agents }}
+
 # Agents push metrics (Prometheus remote write) and logs (Loki push) here,
 # each with its own credentials. See docs/agent-protocol.md.
 (ingest) {
@@ -77,8 +77,8 @@
 		respond 404
 	}
 }
+{{- end }}
 
-{{ end -}}
 (common) {
 	encode zstd gzip
 	header {
