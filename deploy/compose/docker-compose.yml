@@ -30,7 +30,7 @@ services:
       - "127.0.0.1:9090:9090"
 
   alertmanager:
-    image: prom/alertmanager:v0.27.0
+    image: prom/alertmanager:v0.34.1
     <<: *restart
     networks: [monitor]
     command:
