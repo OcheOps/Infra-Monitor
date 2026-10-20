@@ -160,7 +160,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: helm/kind-action@v1.10.0
+      - uses: helm/kind-action@v1.15.1
       - run: make build
       - run: bin/infra-monitor init --probe http://grafana:3000/api/health
       - run: bin/infra-monitor statuspage enable
