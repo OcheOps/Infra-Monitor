@@ -39,6 +39,7 @@ Start the stack now?
 - [Everyday commands](#everyday-commands)
 - [Checking websites and services](#checking-websites-and-services)
 - [Public access and status page](#public-access-and-status-page)
+- [Monitoring more servers](#monitoring-more-servers)
 - [Alerts and notifications](#alerts-and-notifications)
 - [Running on a single host](#running-on-a-single-host-docker-compose)
 - [Running on Kubernetes](#running-on-kubernetes)
@@ -209,6 +210,7 @@ infra-monitor compose up        # or: infra-monitor k8s apply
 | Check prerequisites | `infra-monitor doctor` |
 | Put Grafana on your domain over HTTPS | `infra-monitor expose --domain mon.example.com` |
 | Publish a status page | `infra-monitor statuspage enable` |
+| Monitor another server | `infra-monitor agent add web-2` (prints its join command) |
 | See your settings (secrets hidden) | `infra-monitor config show` |
 | Apply changes on this host | `infra-monitor compose up` |
 | Apply changes on Kubernetes | `infra-monitor k8s apply` |
@@ -281,6 +283,55 @@ Before you expose it, the page is at http://localhost:8081/status/. On
 Kubernetes, the Ingress serves your domain and the gateway sits behind it
 (`infra-monitor k8s port-forward gateway 8081` to view it locally).
 
+## Monitoring more servers
+
+One server runs the full stack; every other machine runs a small agent that
+sends its metrics and logs there over HTTPS. Agents only connect outward, so
+they work behind NAT and firewalls.
+
+**On the server** (it needs a domain first, see
+[Public access](#public-access-and-status-page)):
+
+```bash
+infra-monitor agent add web-2
+infra-monitor compose up          # or: k8s apply
+```
+
+`agent add` prints the two commands to run on the other machine:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OcheOps/Infra-Monitor/main/install.sh | sh
+infra-monitor agent join https://mon.example.com --name web-2 --token <token>
+```
+
+**What the agent does:**
+- **Before saving anything,** `agent join` checks the token with the server.
+- **Then it starts:** Node Exporter, cAdvisor, Fluent Bit, and Prometheus in
+  agent mode, which forwards metrics and stores nothing long-term. Docker is
+  the only requirement.
+- **In Grafana,** the host appears in the Node Exporter and cAdvisor dashboards
+  under its name. Its logs carry an `agent` label in Loki.
+- **If it goes quiet,** the server raises `AgentDown` after 5 minutes,
+  including when the whole machine is down.
+
+| Task | Command |
+|------|---------|
+| See agents and when each last reported | `infra-monitor agent list` |
+| Revoke an agent | `infra-monitor agent remove web-2` (then apply) |
+| Check an agent host | `infra-monitor doctor` (on that host) |
+| Stop sending from a host | `infra-monitor agent leave` (on that host) |
+
+**Details:**
+- **Self-signed certificates:** with `expose --tls internal`, the join command
+  also carries `--ca-sha256`, the server certificate's fingerprint, which the
+  agent checks before trusting it.
+- **No DNS for the server:** if the server's hostname doesn't resolve from the
+  agent's network, add `--server-ip 10.0.0.5` to the join command.
+- **Tokens:** each one is shown once and stored on the server only as a bcrypt
+  hash. Lost a token? `agent remove` it and `agent add` it again.
+
+The wire format is documented in [docs/agent-protocol.md](docs/agent-protocol.md).
+
 ## Alerts and notifications
 
 ### Channels
@@ -339,6 +390,7 @@ and port.
 | `HostOutOfMemory` | under 10% memory available | 5 min |
 | `HostHighCpuLoad` | CPU above 90% | 10 min |
 | `HostClockSkew` | the clock is off by more than 50 ms | 10 min |
+| `AgentDown` | a [registered agent](#monitoring-more-servers) stopped sending for 5 min | 1 min |
 
 On Kubernetes you also get:
 
@@ -671,8 +723,6 @@ image versions from that file too, so one PR updates both backends.
 
 - **Single replica of everything.** Fine for a host or a small-to-medium
   cluster, but not highly available.
-- **One Compose host per stack.** To watch other machines from one stack, run
-  Node Exporter on them and add them with `targets add`.
 - **No authentication in front of Prometheus, Alertmanager, Loki or Jaeger.**
   They're only reachable on `localhost` or inside the cluster; keep it that way,
   or put an authenticating proxy in front.

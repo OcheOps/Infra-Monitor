@@ -34,8 +34,35 @@ type Config struct {
 	Retention     Retention     `yaml:"retention"`
 	Gateway       Gateway       `yaml:"gateway,omitempty"`
 	StatusPage    StatusPage    `yaml:"status_page,omitempty"`
-	Kubernetes    Kubernetes    `yaml:"kubernetes"`
+	// Agents are other hosts allowed to send data to this server.
+	Agents     []Agent    `yaml:"agents,omitempty"`
+	Kubernetes Kubernetes `yaml:"kubernetes"`
+	// Agent, when set, makes this host an agent of another server instead
+	// of running the full stack.
+	Agent *AgentConfig `yaml:"agent,omitempty"`
 }
+
+// Agent is a host registered with this server. Only a bcrypt hash of its
+// token is kept.
+type Agent struct {
+	Name         string `yaml:"name"`
+	PasswordHash string `yaml:"password_hash"`
+}
+
+// AgentConfig is how an agent host reaches its server.
+type AgentConfig struct {
+	Server string `yaml:"server"`
+	Name   string `yaml:"name"`
+	Token  string `yaml:"token"`
+	// CASHA256 pins the server's own CA (for `expose --tls internal`).
+	CASHA256 string `yaml:"ca_sha256,omitempty"`
+	// ServerIP resolves the server's hostname for the agent's containers
+	// when DNS doesn't (an IP address, or "host-gateway").
+	ServerIP string `yaml:"server_ip,omitempty"`
+}
+
+// IsAgent reports whether this host runs as an agent of another server.
+func (c Config) IsAgent() bool { return c.Agent != nil }
 
 // Gateway puts Grafana and the status page behind HTTPS on a public domain.
 // With no Domain, the gateway only listens on localhost.
@@ -281,6 +308,10 @@ func (c Config) Validate() error {
 	var errs []error
 	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 
+	if c.Agent != nil {
+		return c.validateAgent()
+	}
+
 	switch {
 	case c.Grafana.AdminPassword == "":
 		add("grafana.admin_password is empty")
@@ -346,6 +377,23 @@ func (c Config) Validate() error {
 		if m.Name == "" || len(m.Name) > 80 || strings.ContainsAny(m.Name, "\n\r") {
 			add("status_page monitor %q needs a name of at most 80 characters", m.Probe)
 		}
+	}
+
+	agentNames := map[string]bool{}
+	for _, a := range c.Agents {
+		if !targetNameRe.MatchString(a.Name) {
+			add("agent name %q: use lowercase letters, digits, '-' or '_'", a.Name)
+		}
+		if agentNames[a.Name] {
+			add("agent %q is registered twice", a.Name)
+		}
+		agentNames[a.Name] = true
+		if !strings.HasPrefix(a.PasswordHash, "$2") {
+			add("agent %q has no valid password hash; re-add it with `infra-monitor agent add`", a.Name)
+		}
+	}
+	if len(c.Agents) > 0 && c.PublicHost() == "" {
+		add("agents need a public address for this server; set one with `infra-monitor expose --domain`")
 	}
 
 	n := c.Notifications
@@ -414,6 +462,33 @@ func (c Config) Validate() error {
 		}
 	} else if (in.TLSSecret != "" || in.ClusterIssuer != "" || in.ClassName != "") && c.Gateway.Domain == "" {
 		add("kubernetes.ingress settings need a host (set one with `infra-monitor expose --domain`)")
+	}
+	return errors.Join(errs...)
+}
+
+var (
+	tokenRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{20,128}$`)
+	sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+func (c Config) validateAgent() error {
+	var errs []error
+	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
+	ag := c.Agent
+	if u, err := url.Parse(ag.Server); err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") {
+		add("agent.server %q must be the server's https:// address, e.g. https://mon.example.com", ag.Server)
+	}
+	if !targetNameRe.MatchString(ag.Name) {
+		add("agent.name %q: use lowercase letters, digits, '-' or '_'", ag.Name)
+	}
+	if !tokenRe.MatchString(ag.Token) {
+		add("agent.token is missing or malformed; copy it from `infra-monitor agent add` on the server")
+	}
+	if ag.CASHA256 != "" && !sha256Re.MatchString(ag.CASHA256) {
+		add("agent.ca_sha256 must be 64 lowercase hex characters")
+	}
+	if ag.ServerIP != "" && ag.ServerIP != "host-gateway" && net.ParseIP(ag.ServerIP) == nil {
+		add("agent.server_ip %q must be an IP address", ag.ServerIP)
 	}
 	return errors.Join(errs...)
 }

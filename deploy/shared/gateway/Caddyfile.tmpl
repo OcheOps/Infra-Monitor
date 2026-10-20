@@ -1,6 +1,7 @@
 # Rendered by infra-monitor. Routes:
 #   /          -> Grafana (its own login)
 #   /status/   -> public status page (when enabled)
+#   /ingest/   -> metrics and logs from agents (when any are registered)
 {
 	admin off
 {{- with .Email }}
@@ -42,6 +43,42 @@
 	}
 }
 
+{{- if .Agents }}
+# Agents push metrics (Prometheus remote write) and logs (Loki push) here,
+# each with its own credentials. See docs/agent-protocol.md.
+(ingest) {
+	route {
+{{- if .InternalTLS }}
+		# The server's own CA certificate is public: agents fetch it and check
+		# it against the fingerprint in their join command.
+		handle /ca.crt {
+			root * /data/caddy/pki/authorities/local
+			rewrite * /root.crt
+			file_server
+		}
+{{- end }}
+		basic_auth {
+{{- range .Agents }}
+			{{ .Name }} {{ .PasswordHash }}
+{{- end }}
+		}
+		request_header X-Infra-Monitor-Agent {http.auth.user.id}
+		handle /ping {
+			respond "ok" 200
+		}
+		handle /metrics {
+			rewrite * /api/v1/write
+			reverse_proxy prometheus:9090
+		}
+		handle /logs {
+			rewrite * /loki/api/v1/push
+			reverse_proxy loki:3100
+		}
+		respond 404
+	}
+}
+
+{{ end -}}
 (common) {
 	encode zstd gzip
 	header {
@@ -63,6 +100,11 @@
 	redir /status /status/ 308
 	handle_path /status/* {
 		import statuspage
+	}
+{{- end }}
+{{- if .Agents }}
+	handle_path /ingest/* {
+		import ingest
 	}
 {{- end }}
 	handle {

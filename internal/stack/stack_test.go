@@ -227,11 +227,11 @@ func TestLoadExtras(t *testing.T) {
 		t.Errorf("extras not loaded: %v %v", SortedKeys(e.Rules), SortedKeys(e.Dashboards))
 	}
 
-	rules, _ := Rules(Compose, e)
+	rules, _ := Rules(Compose, e, nil)
 	if rules["rules.yml"] == nil || rules["custom-mine.yml"] == nil || rules["kubernetes.yml"] != nil {
 		t.Errorf("compose rules = %v", SortedKeys(rules))
 	}
-	rules, _ = Rules(Kubernetes, e)
+	rules, _ = Rules(Kubernetes, e, nil)
 	if rules["kubernetes.yml"] == nil {
 		t.Errorf("k8s rules = %v", SortedKeys(rules))
 	}

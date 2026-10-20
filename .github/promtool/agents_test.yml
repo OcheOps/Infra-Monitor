@@ -1,0 +1,28 @@
+# AgentDown must stay quiet while an agent reports and fire once it has been
+# silent for 5 minutes (plus the rule's 1m `for`). CI runs this against the
+# agents.yml rendered for a config with agent "web-2".
+rule_files:
+  - agents.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      # Reports for 10 minutes, then goes silent.
+      - series: 'up{job="node",agent="web-2",instance="web-2"}'
+        values: '1x10 _x15'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AgentDown
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: AgentDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AgentDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              agent: web-2
+              job: node
+            exp_annotations:
+              summary: "Agent web-2 has not sent metrics for 5 minutes"

@@ -236,8 +236,9 @@ func hasExt(name string, exts []string) bool {
 	return false
 }
 
-// Rules returns alert rule files by name for a backend, including extras.
-func Rules(b Backend, e Extras) (map[string][]byte, error) {
+// Rules returns alert rule files by name for a backend, including extras
+// and an AgentDown rule per registered agent.
+func Rules(b Backend, e Extras, agents []config.Agent) (map[string][]byte, error) {
 	out := map[string][]byte{}
 	dirs := []string{"shared/alerts"}
 	if b == Kubernetes {
@@ -250,6 +251,13 @@ func Rules(b Backend, e Extras) (map[string][]byte, error) {
 	}
 	for k, v := range e.Rules {
 		out[k] = v
+	}
+	if len(agents) > 0 {
+		r, err := AgentRules(agents)
+		if err != nil {
+			return nil, err
+		}
+		out["agents.yml"] = r
 	}
 	return out, nil
 }
@@ -359,10 +367,12 @@ func GatewayConfig(b Backend, cfg config.Config) ([]byte, error) {
 		HTTPS, InternalTLS      bool
 		StatusPage              bool
 		Queries                 map[string]string
+		Agents                  []config.Agent
 	}{
 		Site:       ":80",
 		StatusPage: cfg.StatusPage.Enabled,
 		Queries:    StatusQueries(cfg),
+		Agents:     cfg.Agents,
 	}
 	if public {
 		data.Site = g.Domain
@@ -377,4 +387,74 @@ func GatewayConfig(b Backend, cfg config.Config) ([]byte, error) {
 		}
 	}
 	return render("gateway", data, [2]string{}, "shared/gateway/Caddyfile.tmpl")
+}
+
+// AgentRules alerts when a registered agent stops sending metrics. The
+// rule keys on the agent's own `up` series, so it also fires when the whole
+// host or its network goes away.
+func AgentRules(agents []config.Agent) ([]byte, error) {
+	type rule struct {
+		Alert       string            `yaml:"alert"`
+		Expr        string            `yaml:"expr"`
+		For         string            `yaml:"for"`
+		Labels      map[string]string `yaml:"labels"`
+		Annotations map[string]string `yaml:"annotations"`
+	}
+	var rules []rule
+	for _, a := range agents {
+		rules = append(rules, rule{
+			Alert:       "AgentDown",
+			Expr:        fmt.Sprintf(`absent_over_time(up{job="node",agent=%s}[5m])`, strconv.Quote(a.Name)),
+			For:         "1m",
+			Labels:      map[string]string{"severity": "critical", "agent": a.Name},
+			Annotations: map[string]string{"summary": "Agent " + a.Name + " has not sent metrics for 5 minutes"},
+		})
+	}
+	return yaml.Marshal(map[string]any{"groups": []map[string]any{{"name": "agents", "rules": rules}}})
+}
+
+// agentData is what the agent templates see.
+type agentData struct {
+	Name, Token, Host, Port, MetricsURL string
+	CA                                  bool
+	Outputs                             []struct{ Match, Job string }
+}
+
+func newAgentData(ag config.AgentConfig, hasCA bool) (agentData, error) {
+	u, err := url.Parse(strings.TrimRight(ag.Server, "/"))
+	if err != nil {
+		return agentData{}, err
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	return agentData{
+		Name: ag.Name, Token: ag.Token, Host: u.Hostname(), Port: port,
+		MetricsURL: u.String() + "/ingest/metrics",
+		CA:         hasCA,
+		Outputs: []struct{ Match, Job string }{
+			{"host.*", "infra-monitor"}, {"containers.*", "container-logs"},
+		},
+	}, nil
+}
+
+// AgentFiles renders an agent host's config directory: Prometheus (agent
+// mode), Fluent Bit, the Docker log parser and the token file.
+func AgentFiles(ag config.AgentConfig, hasCA bool) (map[string][]byte, error) {
+	d, err := newAgentData(ag, hasCA)
+	if err != nil {
+		return nil, err
+	}
+	files := map[string][]byte{"token": []byte(ag.Token)}
+	if files["prometheus.yml"], err = render("agent-prometheus", d, [2]string{}, "agent/prometheus.yml.tmpl"); err != nil {
+		return nil, err
+	}
+	if files["fluent-bit.conf"], err = render("agent-fluentbit", d, [2]string{}, "agent/fluent-bit.conf.tmpl"); err != nil {
+		return nil, err
+	}
+	if files["parsers.conf"], err = deploy.FS.ReadFile("compose/config/parsers.conf"); err != nil {
+		return nil, err
+	}
+	return files, nil
 }

@@ -9,7 +9,8 @@ import (
 // completionTree lists the words that may follow each command path. Keys are
 // space-separated paths of the words already typed ("" is the top level).
 var completionTree = map[string][]string{
-	"":                 {"init", "probes", "targets", "notify", "config", "expose", "statuspage", "compose", "k8s", "doctor", "completion", "version", "help"},
+	"":                 {"init", "probes", "targets", "notify", "config", "agent", "expose", "statuspage", "compose", "k8s", "doctor", "completion", "version", "help"},
+	"agent":            {"add", "list", "remove", "join", "leave"},
 	"expose":           {"off"},
 	"statuspage":       {"show", "enable", "disable", "add", "remove"},
 	"probes":           {"list", "add", "remove"},

@@ -3,7 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"io"
@@ -12,11 +15,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/OcheOps/Infra-Monitor/internal/config"
 	"github.com/OcheOps/Infra-Monitor/internal/doctor"
@@ -318,7 +324,7 @@ func TestMenuAddProbeThenQuit(t *testing.T) {
 		"https://new.example.com", // URL
 		"",                        // done
 		"3",                       // apply now? not now
-		"10",                      // Quit
+		"11",                      // Quit
 	}, "\n") + "\n"
 	a.p = prompt.New(strings.NewReader(script), a.stdout)
 	a.interactive = true
@@ -523,4 +529,177 @@ func TestDoctorPublicChecks(t *testing.T) {
 	if internal := d.Public([]string{"status.example.com"}, true, true); internal[0].Status != doctor.Warn || len(internal) != 1 {
 		t.Errorf("internal TLS should only warn, and skip ports when running: %+v", internal)
 	}
+}
+
+// fakeGateway is a TLS server standing in for the gateway's /ingest routes.
+// It returns the server, its certificate as PEM, and that certificate's
+// SHA-256 (what `agent add` prints as --ca-sha256).
+func fakeGateway(t *testing.T, name, token string) (*httptest.Server, []byte, string) {
+	t.Helper()
+	var caPEM []byte
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ingest/ca.crt":
+			w.Write(caPEM)
+		case "/ingest/ping":
+			if u, p, ok := r.BasicAuth(); !ok || u != name || p != token {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			io.WriteString(w, "ok")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	sum := sha256.Sum256(srv.Certificate().Raw)
+	return srv, caPEM, hex.EncodeToString(sum[:])
+}
+
+func TestAgentAddOnServer(t *testing.T) {
+	a, out := newApp(t, "")
+	a.runT(t, "init")
+	if err := a.run([]string{"--dir", a.dir, "agent", "add", "web-2"}); err == nil || !strings.Contains(err.Error(), "expose --domain") {
+		t.Errorf("agent add without a domain: %v", err)
+	}
+	a.runT(t, "expose", "--domain", "mon.example.com")
+	out.Reset()
+	a.runT(t, "agent", "add", "web-2")
+
+	m := regexp.MustCompile(`agent join https://mon\.example\.com --name web-2 --token (\S+)`).FindStringSubmatch(out.String())
+	if m == nil {
+		t.Fatalf("no join command in output:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "--ca-sha256") {
+		t.Error("Let's Encrypt servers need no CA pin")
+	}
+	cfg := a.cfgT(t)
+	if len(cfg.Agents) != 1 || bcrypt.CompareHashAndPassword([]byte(cfg.Agents[0].PasswordHash), []byte(m[1])) != nil {
+		t.Fatalf("stored hash doesn't match the printed token: %+v", cfg.Agents)
+	}
+	if strings.Contains(mustRead(t, config.Path(a.dir)), m[1]) {
+		t.Error("the plaintext token was saved in the config")
+	}
+	if err := a.run([]string{"--dir", a.dir, "agent", "add", "web-2"}); err == nil {
+		t.Error("adding the same name twice should fail")
+	}
+
+	a.runT(t, "compose", "sync")
+	caddy := mustRead(t, filepath.Join(a.dir, "compose", "gateway", "Caddyfile"))
+	for _, want := range []string{"handle_path /ingest/*", "web-2 " + cfg.Agents[0].PasswordHash, "rewrite * /api/v1/write", "rewrite * /loki/api/v1/push"} {
+		if !strings.Contains(caddy, want) {
+			t.Errorf("Caddyfile missing %q", want)
+		}
+	}
+	if strings.Contains(caddy, "/ca.crt") {
+		t.Error("CA download served without internal TLS")
+	}
+	rules := mustRead(t, filepath.Join(a.dir, "compose", "alerts", "agents.yml"))
+	if !strings.Contains(rules, `absent_over_time(up{job="node",agent="web-2"}[5m])`) {
+		t.Errorf("agents.yml:\n%s", rules)
+	}
+
+	a.runT(t, "agent", "remove", "web-2")
+	a.runT(t, "compose", "sync")
+	if _, err := os.Stat(filepath.Join(a.dir, "compose", "alerts", "agents.yml")); err == nil {
+		t.Error("agents.yml left behind after removing the last agent")
+	}
+}
+
+func TestAgentAddPinsInternalCA(t *testing.T) {
+	_, caPEM, fp := fakeGateway(t, "x", "y")
+	a, out := newApp(t, "")
+	a.runT(t, "init")
+	a.runT(t, "expose", "--domain", "mon.example.com", "--tls", "internal")
+	a.gatewayCA = func() ([]byte, error) { return caPEM, nil }
+	out.Reset()
+	a.runT(t, "agent", "add", "db-1")
+	if !strings.Contains(out.String(), "--ca-sha256 "+fp) {
+		t.Errorf("join command missing the CA pin:\n%s", out.String())
+	}
+	a.runT(t, "compose", "sync")
+	if !strings.Contains(mustRead(t, filepath.Join(a.dir, "compose", "gateway", "Caddyfile")), "handle /ca.crt") {
+		t.Error("gateway doesn't serve its CA for agents to fetch")
+	}
+}
+
+func TestAgentJoin(t *testing.T) {
+	token := strings.Repeat("A", 43)
+	srv, _, fp := fakeGateway(t, "web-2", token)
+
+	a, out := newApp(t, "")
+	join := func(extra ...string) error {
+		return a.run(append([]string{"--dir", a.dir, "agent", "join", srv.URL, "--name", "web-2", "--no-start"}, extra...))
+	}
+	if err := join("--token", token); err == nil || !strings.Contains(err.Error(), "--ca-sha256") {
+		t.Errorf("join to an untrusted cert without a pin: %v", err)
+	}
+	if err := join("--token", token, "--ca-sha256", strings.Repeat("0", 64)); err == nil || !strings.Contains(err.Error(), "doesn't match") {
+		t.Errorf("join with the wrong pin: %v", err)
+	}
+	if err := join("--token", strings.Repeat("B", 43), "--ca-sha256", fp); err == nil || !strings.Contains(err.Error(), "rejected") {
+		t.Errorf("join with the wrong token: %v", err)
+	}
+	if _, err := os.Stat(config.Path(a.dir)); err == nil {
+		t.Fatal("a failed join saved a config")
+	}
+
+	if err := join("--token", token, "--ca-sha256", fp); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "matches the fingerprint") || !strings.Contains(out.String(), `as "web-2"`) {
+		t.Errorf("join output:\n%s", out.String())
+	}
+	cfg := a.cfgT(t)
+	if !cfg.IsAgent() || cfg.Grafana.AdminPassword != "" {
+		t.Errorf("agent config = %+v", cfg)
+	}
+
+	a.runT(t, "compose", "sync")
+	dir := filepath.Join(a.dir, "agent")
+	prom := mustRead(t, filepath.Join(dir, "config", "prometheus.yml"))
+	for _, want := range []string{srv.URL + "/ingest/metrics", "password_file: /etc/infra-monitor/token", "ca_file: /etc/infra-monitor/ca.crt", `agent: "web-2"`} {
+		if !strings.Contains(prom, want) {
+			t.Errorf("agent prometheus.yml missing %q:\n%s", want, prom)
+		}
+	}
+	if strings.Contains(prom, token) {
+		t.Error("token written into prometheus.yml instead of the token file")
+	}
+	fb := mustRead(t, filepath.Join(dir, "config", "fluent-bit.conf"))
+	if !strings.Contains(fb, "Uri          /ingest/logs") || !strings.Contains(fb, "tls.ca_file  /etc/infra-monitor/ca.crt") || !strings.Contains(fb, "agent=web-2") {
+		t.Errorf("fluent-bit.conf:\n%s", fb)
+	}
+	if mustRead(t, filepath.Join(dir, "config", "token")) != token {
+		t.Error("token file wrong")
+	}
+
+	// Server settings are refused on an agent host.
+	if err := a.run([]string{"--dir", a.dir, "probes", "add", "https://x.example.com"}); err == nil || !strings.Contains(err.Error(), "agent") {
+		t.Errorf("probes add on an agent: %v", err)
+	}
+
+	a.runT(t, "agent", "leave")
+	if _, err := os.Stat(config.Path(a.dir)); err == nil {
+		t.Error("agent leave kept the config")
+	}
+}
+
+func TestAgentJoinRefusesServer(t *testing.T) {
+	a, _ := newApp(t, "")
+	a.runT(t, "init")
+	err := a.run([]string{"--dir", a.dir, "agent", "join", "https://mon.example.com", "--name", "x", "--token", strings.Repeat("A", 43)})
+	if err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Errorf("join on a server host: %v", err)
+	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

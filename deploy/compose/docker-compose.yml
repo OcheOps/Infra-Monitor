@@ -24,6 +24,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-360h}
+      - --web.enable-remote-write-receiver
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
       - ./alerts:/etc/prometheus/rules:ro,z
