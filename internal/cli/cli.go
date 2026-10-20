@@ -28,6 +28,10 @@ Setup:
                                alert channels: telegram, slack, email, webhook
   config  show|path            print the config (secrets hidden) or its location
 
+Apps and databases:
+  integrations detect          find PostgreSQL, MySQL, Redis, MongoDB, Nginx, RabbitMQ here
+  integrations list|add|remove monitor them (exporters run next to the stack)
+
 Multiple servers:
   agent add NAME               register another host; prints its join command
   agent list|remove NAME       registered hosts and when each last reported
@@ -128,6 +132,8 @@ func (a *app) run(args []string) error {
 	switch cmd {
 	case "init", "setup":
 		return a.cmdInit(rest)
+	case "integrations", "integration":
+		return a.cmdIntegrations(rest)
 	case "agent", "agents":
 		return a.cmdAgent(rest)
 	case "expose":
@@ -273,6 +279,16 @@ const applyHint = "Apply with `infra-monitor compose up` or `infra-monitor k8s a
 // changed tells the user how to apply a config change, or offers to apply
 // it right away in interactive mode.
 func (a *app) changed() error {
+	if cfg, err := a.load(); err == nil && cfg.IsAgent() {
+		if !a.interactive {
+			fmt.Fprintln(a.stdout, "Apply with `infra-monitor compose up`.")
+			return nil
+		}
+		if ok, err := a.p.Confirm("Apply the change now?", true); err != nil || !ok {
+			return err
+		}
+		return a.composeUp(false)
+	}
 	if !a.interactive {
 		fmt.Fprintln(a.stdout, applyHint)
 		return nil

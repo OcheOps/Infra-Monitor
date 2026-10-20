@@ -39,6 +39,17 @@
       - target_label: __address__
         replacement: blackbox:9115
 {{- end }}
+{{- range .Integrations }}
+  - job_name: {{ q .Job }}
+{{- with .Path }}
+    metrics_path: {{ q . }}
+{{- end }}
+    static_configs:
+      - targets: [{{ q .Address }}]
+    relabel_configs:
+      - target_label: instance
+        replacement: {{ q (trimPrefix "integration-" .Job) }}
+{{- end }}
 {{- range .Targets }}
   - job_name: {{ q .Name }}
 {{- with .Path }}

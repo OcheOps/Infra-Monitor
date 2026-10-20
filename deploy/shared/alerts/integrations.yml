@@ -1,0 +1,50 @@
+# Alerts for services added with `infra-monitor integrations`. An exporter
+# that can't be scraped at all is covered by InstanceDown.
+groups:
+  - name: integrations
+    rules:
+      - alert: ServiceDown
+        expr: |
+          label_replace(pg_up, "service", "PostgreSQL", "", "") == 0
+          or label_replace(mysql_up, "service", "MySQL", "", "") == 0
+          or label_replace(redis_up, "service", "Redis", "", "") == 0
+          or label_replace(mongodb_up, "service", "MongoDB", "", "") == 0
+          or label_replace(nginx_up, "service", "Nginx", "", "") == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} {{ $labels.instance }} is down or refuses the exporter's login"
+      - alert: PostgresTooManyConnections
+        expr: sum by (instance) (pg_stat_activity_count) / on (instance) group_left max by (instance) (pg_settings_max_connections) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL {{ $labels.instance }} uses {{ $value | humanizePercentage }} of its connections"
+      - alert: MySQLTooManyConnections
+        expr: mysql_global_status_threads_connected / mysql_global_variables_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL {{ $labels.instance }} uses {{ $value | humanizePercentage }} of its connections"
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9 and redis_memory_max_bytes > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis {{ $labels.instance }} uses {{ $value | humanizePercentage }} of maxmemory"
+      - alert: RedisRejectingConnections
+        expr: increase(redis_rejected_connections_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis {{ $labels.instance }} rejected {{ $value }} connections in 5 minutes (maxclients reached)"
+      - alert: RabbitMQResourceAlarm
+        expr: rabbitmq_alarms_memory_used_watermark == 1 or rabbitmq_alarms_free_disk_space_watermark == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "RabbitMQ {{ $labels.instance }} hit a memory or disk alarm and is blocking publishers"

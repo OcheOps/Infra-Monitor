@@ -524,6 +524,18 @@ func redact(c config.Config) config.Config {
 		n.Webhook = &w
 	}
 	c.Notifications = n
+	ints := slices.Clone(c.Integrations)
+	for i := range ints {
+		if ints[i].Password != "" {
+			ints[i].Password = hidden
+		}
+	}
+	c.Integrations = ints
+	if c.Agent != nil {
+		ag := *c.Agent
+		ag.Token = hidden
+		c.Agent = &ag
+	}
 	return c
 }
 

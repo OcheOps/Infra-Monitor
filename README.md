@@ -38,6 +38,7 @@ Start the stack now?
 - [Quick start](#quick-start)
 - [Everyday commands](#everyday-commands)
 - [Checking websites and services](#checking-websites-and-services)
+- [Databases, caches and web servers](#databases-caches-and-web-servers)
 - [Public access and status page](#public-access-and-status-page)
 - [Monitoring more servers](#monitoring-more-servers)
 - [Alerts and notifications](#alerts-and-notifications)
@@ -208,6 +209,7 @@ infra-monitor compose up        # or: infra-monitor k8s apply
 | Set up alert channels | `infra-monitor notify setup` |
 | Send a test alert | `infra-monitor notify test` |
 | Check prerequisites | `infra-monitor doctor` |
+| Find databases and other services to monitor | `infra-monitor integrations detect` |
 | Put Grafana on your domain over HTTPS | `infra-monitor expose --domain mon.example.com` |
 | Publish a status page | `infra-monitor statuspage enable` |
 | Monitor another server | `infra-monitor agent add web-2` (prints its join command) |
@@ -233,6 +235,58 @@ infra-monitor probes add tcp://db.internal:5432     # TCP: is the port accepting
 
 Every check alerts you when it fails for 2 minutes, when it's slow (over 5
 seconds on average), and when its TLS certificate expires within 14 days.
+
+## Databases, caches and web servers
+
+`integrations detect` looks for services running on this host, in Docker
+containers or listening on their usual ports, and offers to monitor each one:
+
+```bash
+infra-monitor integrations detect
+```
+
+```
+Found 2 service(s):
+  postgres  container shop-db-1 (postgres:16) → shop-db-1:5432
+  redis     container shop-cache-1 (redis:7) → shop-cache-1:6379
+Monitor PostgreSQL at shop-db-1:5432? [Y/n]
+```
+
+In a script it prints the `integrations add` commands to run instead. To add
+one by hand:
+
+```bash
+infra-monitor integrations add postgres shop-db db.internal:5432 --username exporter --password '...'
+infra-monitor integrations add redis cache shop-cache:6379 --network shop_default
+infra-monitor compose up
+```
+
+| Type | Collected by | Needs |
+|------|--------------|-------|
+| `postgres` | [postgres_exporter](https://github.com/prometheus-community/postgres_exporter) | a login; read-only works: `GRANT pg_monitor TO exporter` |
+| `mysql` | [mysqld_exporter](https://github.com/prometheus/mysqld_exporter) (MySQL and MariaDB) | a login with `PROCESS, REPLICATION CLIENT, SELECT` |
+| `redis` | [redis_exporter](https://github.com/oliver006/redis_exporter) (also Valkey, KeyDB) | the password, if set |
+| `mongodb` | [mongodb_exporter](https://github.com/percona/mongodb_exporter) | a user with `clusterMonitor`, if auth is on |
+| `nginx` | [nginx-prometheus-exporter](https://github.com/nginxinc/nginx-prometheus-exporter) | [`stub_status`](https://nginx.org/en/docs/http/ngx_http_stub_status_module.html) enabled (`--path` if not `/stub_status`) |
+| `rabbitmq` | RabbitMQ's own metrics on port 15692 | the `rabbitmq_prometheus` plugin |
+
+**How it works:**
+- **Exporters:** each integration gets its own exporter container next to the
+  stack, and `integrations remove` takes it away again.
+- **Credentials:** they stay in `config.yaml` and in an env file only you can
+  read, never in the Compose file.
+- **Reaching the service:** for a service in a container, the exporter joins
+  its Docker network (`--network`). For one installed on the host, use
+  `host.docker.internal:PORT`. The service must listen on more than
+  `127.0.0.1`.
+- **Dashboard and alerts:** results show in the **Apps and databases**
+  dashboard, and `ServiceDown` fires when a service stops answering its
+  exporter.
+- **Agents:** integrations work on [agent hosts](#monitoring-more-servers)
+  too. Run the same commands there.
+- **Kubernetes:** integrations aren't deployed by `k8s apply`. Run exporters
+  in the cluster (for example from their Helm charts) and add them with
+  `targets add`. The dashboard and alerts still apply.
 
 ## Public access and status page
 
@@ -391,6 +445,11 @@ and port.
 | `HostHighCpuLoad` | CPU above 90% | 10 min |
 | `HostClockSkew` | the clock is off by more than 50 ms | 10 min |
 | `AgentDown` | a [registered agent](#monitoring-more-servers) stopped sending for 5 min | 1 min |
+| `ServiceDown` | a [database or other integration](#databases-caches-and-web-servers) stops answering its exporter | 1 min |
+| `PostgresTooManyConnections` / `MySQLTooManyConnections` | over 80% of `max_connections` in use | 5 min |
+| `RedisMemoryHigh` | Redis uses over 90% of `maxmemory` | 5 min |
+| `RedisRejectingConnections` | Redis turned clients away (`maxclients`) | — |
+| `RabbitMQResourceAlarm` | RabbitMQ hit its memory or disk alarm and blocks publishers | — |
 
 On Kubernetes you also get:
 
@@ -589,6 +648,13 @@ probes:
 targets:
   - name: db-1
     address: 10.0.0.7:9100
+integrations:
+  - type: postgres
+    name: shop-db
+    address: shop-db-1:5432
+    network: shop_default
+    username: exporter
+    password: ...
 notifications:
   telegram:
     bot_token: ...
@@ -684,8 +750,11 @@ internal/config/     config.yaml: loading, validation, saving, .env migration
 internal/stack/      renders Prometheus, Alertmanager, Loki and Jaeger configs; rules; dashboards
 internal/compose/    writes the Compose project, runs `docker compose`
 internal/k8s/        renders the manifest templates, runs `kubectl`
+internal/integrations/  finds services to monitor; renders their exporters
 deploy/compose/      docker-compose.yml (the single list of pinned image versions)
 deploy/k8s/          manifest templates and Kubernetes-only rules
+deploy/agent/        Compose bundle for agent hosts
+deploy/integrations/ pinned exporter images for integrations
 deploy/shared/       config templates, alert rules and Grafana provisioning for both backends
 ```
 

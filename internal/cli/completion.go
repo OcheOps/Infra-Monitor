@@ -4,13 +4,17 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/OcheOps/Infra-Monitor/internal/integrations"
 )
 
 // completionTree lists the words that may follow each command path. Keys are
 // space-separated paths of the words already typed ("" is the top level).
 var completionTree = map[string][]string{
-	"":                 {"init", "probes", "targets", "notify", "config", "agent", "expose", "statuspage", "compose", "k8s", "doctor", "completion", "version", "help"},
+	"":                 {"init", "probes", "targets", "notify", "config", "integrations", "agent", "expose", "statuspage", "compose", "k8s", "doctor", "completion", "version", "help"},
 	"agent":            {"add", "list", "remove", "join", "leave"},
+	"integrations":     {"detect", "list", "add", "remove"},
+	"integrations add": integrations.Types(),
 	"expose":           {"off"},
 	"statuspage":       {"show", "enable", "disable", "add", "remove"},
 	"probes":           {"list", "add", "remove"},
@@ -29,7 +33,8 @@ var completionTree = map[string][]string{
 
 // dynamicCompletions are shell snippets that print candidates at runtime.
 var dynamicCompletions = map[string]string{
-	"targets remove": `infra-monitor targets list 2>/dev/null | awk 'NF>1 && $1 !~ /^No$/ {print $1}'`,
+	"integrations remove": `infra-monitor integrations list 2>/dev/null | awk 'NF>1 && $1 !~ /^No$/ {print $1}'`,
+	"targets remove":      `infra-monitor targets list 2>/dev/null | awk 'NF>1 && $1 !~ /^No$/ {print $1}'`,
 }
 
 func sortedPaths() []string {
