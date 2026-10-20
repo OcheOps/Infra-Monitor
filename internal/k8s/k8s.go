@@ -25,6 +25,7 @@ var manifests = []string{
 	"prometheus.yaml",
 	"alertmanager.yaml",
 	"grafana.yaml",
+	"gateway.yaml",
 	"node-exporter.yaml",
 	"kube-state-metrics.yaml",
 	"blackbox.yaml",
@@ -40,6 +41,7 @@ var Ports = map[string]int{
 	"alertmanager": 9093,
 	"jaeger":       16686,
 	"loki":         3100,
+	"gateway":      80,
 }
 
 type Options struct {
@@ -118,6 +120,9 @@ func Render(cfg config.Config, extras stack.Extras, opts Options) ([]byte, error
 			return add("dashboardProvider", b, err)
 		},
 		func() error { b, err := read("k8s/fluent-bit.conf"); return add("fluentbit", b, err) },
+		func() error { b, err := stack.GatewayConfig(stack.Kubernetes, cfg); return add("gateway", b, err) },
+		func() error { b, err := stack.StatusPageJSON(cfg); return add("statusJSON", b, err) },
+		func() error { b, err := read("shared/gateway/status/index.html"); return add("statusHTML", b, err) },
 	} {
 		if err := step(); err != nil {
 			return nil, err
@@ -163,6 +168,9 @@ func Render(cfg config.Config, extras stack.Extras, opts Options) ([]byte, error
 		"StorageClass":     k.StorageClass,
 		"Storage":          k.Storage,
 		"Ingress":          k.Ingress,
+		"PublicHost":       cfg.PublicHost(),
+		"StatusDomain":     cfg.Gateway.StatusDomain,
+		"IngressHosts":     ingressHosts(cfg),
 		"IngressTLSSecret": tlsSecret,
 		"IngressScheme":    scheme,
 		"Retention":        d.Retention,
@@ -175,7 +183,8 @@ func Render(cfg config.Config, extras stack.Extras, opts Options) ([]byte, error
 		"Checksums": map[string]string{
 			"prometheus":   checksum(append([]string{files["prometheus"]}, ruleSum...)...),
 			"alertmanager": checksum(files["alertmanager"]),
-			"grafana":      checksum(append([]string{files["datasources"], files["dashboardProvider"], cfg.Grafana.AdminPassword, scheme, k.Ingress.Host}, dashSum...)...),
+			"grafana":      checksum(append([]string{files["datasources"], files["dashboardProvider"], cfg.Grafana.AdminPassword, scheme, cfg.PublicHost()}, dashSum...)...),
+			"gateway":      checksum(files["gateway"], files["statusJSON"], files["statusHTML"]),
 			"fluentbit":    checksum(files["fluentbit"]),
 			"loki":         checksum(files["loki"]),
 			"jaeger":       checksum(files["jaeger"]),
@@ -204,6 +213,18 @@ func Render(cfg config.Config, extras stack.Extras, opts Options) ([]byte, error
 		}
 	}
 	return out.Bytes(), nil
+}
+
+// ingressHosts lists the hostnames the gateway Ingress serves.
+func ingressHosts(cfg config.Config) []string {
+	var hosts []string
+	if h := cfg.PublicHost(); h != "" {
+		hosts = append(hosts, h)
+		if sd := cfg.Gateway.StatusDomain; sd != "" {
+			hosts = append(hosts, sd)
+		}
+	}
+	return hosts
 }
 
 // indent prefixes every line of s with n spaces, for YAML block scalars.

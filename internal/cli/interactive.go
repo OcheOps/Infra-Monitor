@@ -449,6 +449,7 @@ func (a *app) menu() error {
 		{"Check a website or service (add / remove URLs)", a.menuProbes},
 		{"Scrape another metrics endpoint (add / remove targets)", a.menuTargets},
 		{"Alert notifications (Telegram, Slack, email, webhook)", a.menuNotify},
+		{"Public access over HTTPS and the status page", a.menuPublic},
 		{"Start or update on this host (Docker Compose)", func() error { return a.composeUp(false) }},
 		{"Deploy or update on Kubernetes", a.offerK8s},
 		{"Show status", a.menuStatus},
@@ -548,6 +549,13 @@ func (a *app) menuNotify() error {
 		return a.cmdNotify([]string{"test"})
 	}
 	return nil
+}
+
+func (a *app) menuPublic() error {
+	if err := a.cmdExpose(nil); err != nil {
+		return err
+	}
+	return a.cmdStatusPage([]string{"enable"})
 }
 
 func (a *app) menuStatus() error {

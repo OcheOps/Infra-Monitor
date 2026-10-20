@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -317,7 +318,7 @@ func TestMenuAddProbeThenQuit(t *testing.T) {
 		"https://new.example.com", // URL
 		"",                        // done
 		"3",                       // apply now? not now
-		"9",                       // Quit
+		"10",                      // Quit
 	}, "\n") + "\n"
 	a.p = prompt.New(strings.NewReader(script), a.stdout)
 	a.interactive = true
@@ -441,5 +442,85 @@ func TestPreflightBlocksComposeUp(t *testing.T) {
 	err = a.run([]string{"--dir", a.dir, "k8s", "apply"})
 	if err == nil || !strings.Contains(err.Error(), "kubectl installed") {
 		t.Errorf("k8s apply error = %v", err)
+	}
+}
+
+func TestExposeAndStatusPage(t *testing.T) {
+	a, out := newApp(t, "")
+	a.runT(t, "init", "--probe", "https://shop.example.com/health", "--probe", "tcp://db:5432")
+
+	if err := a.run([]string{"--dir", a.dir, "expose", "--domain", "not a domain"}); err == nil {
+		t.Error("expected an error for an invalid domain")
+	}
+	a.runT(t, "expose", "--domain", "mon.example.com", "--email", "ops@example.com")
+	if g := a.cfgT(t).Gateway; g.Domain != "mon.example.com" || g.TLS != "auto" {
+		t.Errorf("gateway = %+v", g)
+	}
+	if !strings.Contains(out.String(), "DNS A/AAAA record for mon.example.com") {
+		t.Errorf("expose output missing DNS instructions:\n%s", out.String())
+	}
+
+	// Scripted enable shows the HTTP check but not the (often internal) TCP one.
+	a.runT(t, "statuspage", "enable", "--title", "Acme status")
+	sp := a.cfgT(t).StatusPage
+	if !sp.Enabled || sp.Title != "Acme status" || len(sp.Monitors) != 1 || sp.Monitors[0].Name != "shop.example.com/health" {
+		t.Errorf("status page = %+v", sp)
+	}
+
+	a.runT(t, "statuspage", "add", "tcp://db:5432", "--name", "Database")
+	a.runT(t, "statuspage", "add", "https://api.example.com", "--name", "API") // also adds the probe
+	cfg := a.cfgT(t)
+	if len(cfg.StatusPage.Monitors) != 3 || !slices.Contains(cfg.Probes, "https://api.example.com") {
+		t.Errorf("after add: %+v / %v", cfg.StatusPage.Monitors, cfg.Probes)
+	}
+
+	// Removing a probe also takes it off the page.
+	a.runT(t, "probes", "remove", "tcp://db:5432")
+	if m := a.cfgT(t).StatusPage.Monitors; len(m) != 2 {
+		t.Errorf("monitors after probe removal = %+v", m)
+	}
+
+	out.Reset()
+	a.runT(t, "statuspage", "show")
+	if !strings.Contains(out.String(), "https://mon.example.com/status/") || !strings.Contains(out.String(), "API") {
+		t.Errorf("statuspage show:\n%s", out.String())
+	}
+
+	// The gateway files reflect it.
+	a.runT(t, "compose", "sync")
+	caddy, _ := os.ReadFile(filepath.Join(a.dir, "compose", "gateway", "Caddyfile"))
+	page, _ := os.ReadFile(filepath.Join(a.dir, "compose", "gateway", "status", "config.json"))
+	if !strings.Contains(string(caddy), "mon.example.com {") || !strings.Contains(string(page), `"name": "API"`) {
+		t.Errorf("gateway files not rendered:\n%s\n%s", caddy, page)
+	}
+
+	a.runT(t, "expose", "off")
+	if a.cfgT(t).Gateway.Domain != "" {
+		t.Error("expose off did not clear the domain")
+	}
+	a.runT(t, "statuspage", "disable")
+	if a.cfgT(t).StatusPage.Enabled {
+		t.Error("statuspage disable did not turn it off")
+	}
+}
+
+func TestDoctorPublicChecks(t *testing.T) {
+	d := fakeDoctor("docker")
+	d.Resolve = func(h string) ([]string, error) {
+		if h == "mon.example.com" {
+			return []string{"203.0.113.7"}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+	checks := d.Public([]string{"mon.example.com", "status.example.com"}, false, false)
+	byName := map[string]doctor.Check{}
+	for _, c := range checks {
+		byName[c.Name] = c
+	}
+	if byName["DNS for mon.example.com"].Status != doctor.OK || byName["DNS for status.example.com"].Status != doctor.Fail {
+		t.Errorf("checks = %+v", checks)
+	}
+	if internal := d.Public([]string{"status.example.com"}, true, true); internal[0].Status != doctor.Warn || len(internal) != 1 {
+		t.Errorf("internal TLS should only warn, and skip ports when running: %+v", internal)
 	}
 }

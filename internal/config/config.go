@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -31,7 +32,33 @@ type Config struct {
 	Targets       []Target      `yaml:"targets,omitempty"`
 	Notifications Notifications `yaml:"notifications,omitempty"`
 	Retention     Retention     `yaml:"retention"`
+	Gateway       Gateway       `yaml:"gateway,omitempty"`
+	StatusPage    StatusPage    `yaml:"status_page,omitempty"`
 	Kubernetes    Kubernetes    `yaml:"kubernetes"`
+}
+
+// Gateway puts Grafana and the status page behind HTTPS on a public domain.
+// With no Domain, the gateway only listens on localhost.
+type Gateway struct {
+	Domain       string `yaml:"domain,omitempty"`
+	StatusDomain string `yaml:"status_domain,omitempty"`
+	// TLS is "auto" (Let's Encrypt, the default) or "internal" (a certificate
+	// from the gateway's own CA, for hosts without public DNS).
+	TLS   string `yaml:"tls,omitempty"`
+	Email string `yaml:"email,omitempty"`
+}
+
+// StatusPage is a public page showing the state of selected probes.
+type StatusPage struct {
+	Enabled  bool      `yaml:"enabled,omitempty"`
+	Title    string    `yaml:"title,omitempty"`
+	Monitors []Monitor `yaml:"monitors,omitempty"`
+}
+
+// Monitor is a probe shown on the status page under a display name.
+type Monitor struct {
+	Probe string `yaml:"probe"`
+	Name  string `yaml:"name"`
 }
 
 type Grafana struct {
@@ -127,6 +154,19 @@ func (c *Config) ApplyDefaults() {
 	set(&c.Kubernetes.Storage.Loki, "10Gi")
 	set(&c.Kubernetes.Storage.Jaeger, "5Gi")
 	set(&c.Kubernetes.Storage.Grafana, "1Gi")
+	if c.Gateway.Domain != "" {
+		set(&c.Gateway.TLS, "auto")
+	}
+	set(&c.StatusPage.Title, "Service status")
+}
+
+// PublicHost is the hostname Grafana is served on, for either backend:
+// gateway.domain, or the older kubernetes.ingress.host.
+func (c Config) PublicHost() string {
+	if c.Gateway.Domain != "" {
+		return c.Gateway.Domain
+	}
+	return c.Kubernetes.Ingress.Host
 }
 
 // ErrNotFound is returned by Load when no config exists yet.
@@ -269,6 +309,45 @@ func (c Config) Validate() error {
 		names[t.Name] = true
 	}
 
+	g := c.Gateway
+	for _, h := range []struct{ name, v string }{{"domain", g.Domain}, {"status_domain", g.StatusDomain}} {
+		if h.v != "" && (!hostnameRe.MatchString(h.v) || strings.HasPrefix(h.v, "*.")) && h.v != "localhost" {
+			add("gateway.%s %q is not a valid hostname", h.name, h.v)
+		}
+	}
+	if g.StatusDomain != "" && g.Domain == "" {
+		add("gateway.status_domain needs gateway.domain to be set too")
+	}
+	if g.StatusDomain != "" && g.StatusDomain == g.Domain {
+		add("gateway.status_domain must differ from gateway.domain (the status page is already at /status)")
+	}
+	if g.TLS != "" && g.TLS != "auto" && g.TLS != "internal" {
+		add("gateway.tls must be auto or internal")
+	}
+	if g.Email != "" {
+		if _, err := mail.ParseAddress(g.Email); err != nil {
+			add("gateway.email %q is invalid", g.Email)
+		}
+	}
+
+	sp := c.StatusPage
+	if len(sp.Title) > 80 || strings.ContainsAny(sp.Title, "\n\r<>") {
+		add("status_page.title must be at most 80 characters without <, > or newlines")
+	}
+	shown := map[string]bool{}
+	for _, m := range sp.Monitors {
+		if !slices.Contains(c.Probes, m.Probe) {
+			add("status_page monitor %q is not one of your probes", m.Probe)
+		}
+		if shown[m.Probe] {
+			add("status_page shows %q twice", m.Probe)
+		}
+		shown[m.Probe] = true
+		if m.Name == "" || len(m.Name) > 80 || strings.ContainsAny(m.Name, "\n\r") {
+			add("status_page monitor %q needs a name of at most 80 characters", m.Probe)
+		}
+	}
+
 	n := c.Notifications
 	if t := n.Telegram; t != nil {
 		if !telegramTokenRe.MatchString(t.BotToken) {
@@ -333,8 +412,8 @@ func (c Config) Validate() error {
 				add("kubernetes.ingress.%s %q is invalid", f.name, f.v)
 			}
 		}
-	} else if in.TLSSecret != "" || in.ClusterIssuer != "" || in.ClassName != "" {
-		add("kubernetes.ingress settings need a host")
+	} else if (in.TLSSecret != "" || in.ClusterIssuer != "" || in.ClassName != "") && c.Gateway.Domain == "" {
+		add("kubernetes.ingress settings need a host (set one with `infra-monitor expose --domain`)")
 	}
 	return errors.Join(errs...)
 }

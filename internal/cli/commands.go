@@ -199,6 +199,7 @@ func (a *app) cmdProbes(args []string) error {
 				return fmt.Errorf("%s is not in the list; see `infra-monitor probes list`", u)
 			}
 			cfg.Probes = slices.Delete(cfg.Probes, i, i+1)
+			removeMonitor(&cfg, u)
 			fmt.Fprintf(a.stdout, "Removed %s\n", u)
 		}
 		if err := a.save(cfg); err != nil {
@@ -589,7 +590,14 @@ func (a *app) composeUp(restartOnly bool) error {
 		return err
 	}
 	dir := a.composeDir()
-	if err := a.preflight(func(d *doctor.Doctor) []doctor.Check { return d.Compose(a.composeRunning()) }); err != nil {
+	if err := a.preflight(func(d *doctor.Doctor) []doctor.Check {
+		running := a.composeRunning()
+		checks := d.Compose(running)
+		if g := cfg.Gateway; g.Domain != "" {
+			checks = append(checks, d.Public(publicHosts(cfg), g.TLS == "internal", running)...)
+		}
+		return checks
+	}); err != nil {
 		return err
 	}
 	changed, err := compose.Sync(dir, cfg, extras)
@@ -608,19 +616,9 @@ func (a *app) composeUp(restartOnly bool) error {
 			return err
 		}
 	}
-	fmt.Fprint(a.stdout, composeEndpoints)
+	a.printComposeEndpoints(cfg)
 	return nil
 }
-
-const composeEndpoints = `
-Infra Monitor is running:
-  Grafana:      http://localhost:3000  (user admin; password: infra-monitor config path)
-  Prometheus:   http://localhost:9090
-  Alertmanager: http://localhost:9093
-  Jaeger:       http://localhost:16686  (OTLP: localhost:4317 gRPC, localhost:4318 HTTP)
-  Loki:         http://localhost:3100
-  cAdvisor:     http://localhost:8080
-`
 
 // ---- k8s --------------------------------------------------------------
 
@@ -838,7 +836,11 @@ func (a *app) cmdDoctor(args []string) error {
 
 	var composeOK, k8sOK bool
 	if which == "all" || which == "compose" {
-		checks := d.Compose(a.composeRunning())
+		running := a.composeRunning()
+		checks := d.Compose(running)
+		if g := cfg.Gateway; g.Domain != "" {
+			checks = append(checks, d.Public(publicHosts(cfg), g.TLS == "internal", running)...)
+		}
 		doctor.Print(a.stdout, "Docker Compose (this host)", checks)
 		fmt.Fprintln(a.stdout)
 		composeOK = !doctor.Failed(checks)
@@ -881,4 +883,13 @@ func (a *app) preflight(checks func(*doctor.Doctor) []doctor.Check) error {
 func (a *app) composeRunning() bool {
 	out, err := exec.Command("docker", "compose", "--project-name", compose.ProjectName, "ps", "-q").Output()
 	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
+// publicHosts are the hostnames the gateway serves publicly.
+func publicHosts(cfg config.Config) []string {
+	hosts := []string{cfg.Gateway.Domain}
+	if sd := cfg.Gateway.StatusDomain; sd != "" {
+		hosts = append(hosts, sd)
+	}
+	return hosts
 }
