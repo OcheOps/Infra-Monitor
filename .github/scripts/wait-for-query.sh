@@ -5,7 +5,7 @@
 set -uo pipefail
 fetch=$1 query=$2
 url="http://localhost:9090/api/v1/query?query=$(jq -rn --arg q "$query" '$q|@uri')"
-for i in $(seq ${WAIT_TRIES:-40}); do
+for _ in $(seq "${WAIT_TRIES:-40}"); do
   json=$(eval "$fetch \"$url\"" 2>/dev/null) || json='{}'
   if echo "$json" | jq -e '(.data.result | length) > 0 and all(.data.result[]; .value[1] != "0")' >/dev/null 2>&1; then
     echo "OK: $query"

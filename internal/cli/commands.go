@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os/exec"
 	"slices"
 	"sort"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/OcheOps/Infra-Monitor/internal/compose"
 	"github.com/OcheOps/Infra-Monitor/internal/config"
+	"github.com/OcheOps/Infra-Monitor/internal/doctor"
 	"github.com/OcheOps/Infra-Monitor/internal/k8s"
 	"github.com/OcheOps/Infra-Monitor/internal/stack"
 )
@@ -587,6 +589,9 @@ func (a *app) composeUp(restartOnly bool) error {
 		return err
 	}
 	dir := a.composeDir()
+	if err := a.preflight(func(d *doctor.Doctor) []doctor.Check { return d.Compose(a.composeRunning()) }); err != nil {
+		return err
+	}
 	changed, err := compose.Sync(dir, cfg, extras)
 	if err != nil {
 		return err
@@ -675,6 +680,9 @@ func (a *app) cmdK8s(args []string) error {
 		}
 		if sub == "render" {
 			_, err := a.stdout.Write(out)
+			return err
+		}
+		if err := a.preflight(func(d *doctor.Doctor) []doctor.Check { return d.Kubernetes(k.Context) }); err != nil {
 			return err
 		}
 		// Server-side apply: the dashboard ConfigMaps are too large for the
@@ -795,4 +803,82 @@ func (a *app) k8sConfigure(args []string) error {
 	}
 	fmt.Fprintln(a.stdout, "Kubernetes settings saved. Deploy with `infra-monitor k8s apply`.")
 	return nil
+}
+
+// ---- doctor -----------------------------------------------------------
+
+func (a *app) cmdDoctor(args []string) error {
+	d := a.doctor
+	if d == nil {
+		d = doctor.New()
+	}
+	which := "all"
+	if len(args) > 0 {
+		which = args[0]
+	}
+	if which != "all" && which != "compose" && which != "k8s" && which != "kubernetes" {
+		return fmt.Errorf("usage: infra-monitor doctor [compose|k8s]")
+	}
+
+	cfg, _, err := a.loadOrDefault()
+	switch {
+	case err != nil:
+		fmt.Fprintf(a.stdout, "Configuration\n  ✗ %v\n\n", err)
+	case cfg.Grafana.AdminPassword == "":
+		fmt.Fprintf(a.stdout, "Configuration\n  ! not set up yet\n      → run `infra-monitor` to start the setup wizard\n\n")
+	default:
+		if verr := cfg.Validate(); verr != nil {
+			fmt.Fprintf(a.stdout, "Configuration\n  ✗ %s: %v\n\n", config.Path(a.dir), verr)
+		} else if _, xerr := stack.LoadExtras(a.dir); xerr != nil {
+			fmt.Fprintf(a.stdout, "Configuration\n  ✗ %v\n\n", xerr)
+		} else {
+			fmt.Fprintf(a.stdout, "Configuration\n  ✓ %s\n\n", config.Path(a.dir))
+		}
+	}
+
+	var composeOK, k8sOK bool
+	if which == "all" || which == "compose" {
+		checks := d.Compose(a.composeRunning())
+		doctor.Print(a.stdout, "Docker Compose (this host)", checks)
+		fmt.Fprintln(a.stdout)
+		composeOK = !doctor.Failed(checks)
+	}
+	if which != "compose" {
+		checks := d.Kubernetes(cfg.Kubernetes.Context)
+		doctor.Print(a.stdout, "Kubernetes", checks)
+		fmt.Fprintln(a.stdout)
+		k8sOK = !doctor.Failed(checks)
+	}
+
+	switch {
+	case which == "all" && (composeOK || k8sOK):
+		var ready []string
+		if composeOK {
+			ready = append(ready, "`infra-monitor compose up`")
+		}
+		if k8sOK {
+			ready = append(ready, "`infra-monitor k8s apply`")
+		}
+		fmt.Fprintf(a.stdout, "Ready: %s\n", strings.Join(ready, " or "))
+		return nil
+	case composeOK || k8sOK:
+		fmt.Fprintln(a.stdout, "Ready.")
+		return nil
+	default:
+		return errors.New("prerequisites missing; see the fixes above")
+	}
+}
+
+// preflight runs prerequisite checks and returns the first failure.
+func (a *app) preflight(checks func(*doctor.Doctor) []doctor.Check) error {
+	if a.doctor == nil {
+		return nil
+	}
+	return doctor.FirstFailure(checks(a.doctor))
+}
+
+// composeRunning reports whether the Infra Monitor containers are up.
+func (a *app) composeRunning() bool {
+	out, err := exec.Command("docker", "compose", "--project-name", compose.ProjectName, "ps", "-q").Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }

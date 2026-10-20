@@ -93,8 +93,25 @@ flowchart LR
 
 ## Install
 
-Download a release for your platform from the
-[Releases page](https://github.com/OcheOps/Infra-Monitor/releases):
+```bash
+curl -fsSL https://raw.githubusercontent.com/OcheOps/Infra-Monitor/main/install.sh | sh
+```
+
+The installer detects your OS and CPU, downloads the matching release,
+verifies its checksum and installs `infra-monitor`:
+- **Where it goes:** `/usr/local/bin`, using sudo if needed. If sudo isn't
+  available, it falls back to `~/.local/bin`.
+- **Upgrading:** run the same command again.
+- **Pinning a version:** prefix it with `INFRA_MONITOR_VERSION=v0.1.0`.
+- **Choosing the folder:** prefix it with `INFRA_MONITOR_INSTALL_DIR=~/bin`.
+
+Prefer not to pipe a script into your shell? Download it first and read it:
+`curl -fsSLO https://raw.githubusercontent.com/OcheOps/Infra-Monitor/main/install.sh && less install.sh && sh install.sh`.
+
+<details>
+<summary><b>Other ways to install</b></summary>
+
+From the [Releases page](https://github.com/OcheOps/Infra-Monitor/releases):
 
 | Platform | Install |
 |----------|---------|
@@ -104,14 +121,53 @@ Download a release for your platform from the
 | With Go | `go install github.com/OcheOps/Infra-Monitor/cmd/infra-monitor@latest` |
 | From source | `make install` (installs to `/usr/local/bin`; needs Go 1.22+) |
 
-Builds are published for Linux and macOS on amd64 and arm64, with a
+The `.deb` and `.rpm` packages also install tab completion for bash, zsh and
+fish. Builds are published for Linux and macOS on amd64 and arm64, with a
 `checksums.txt` to verify downloads.
 
-**To run the stack** you need one of:
+</details>
 
-- **Docker** with the Compose plugin (`docker compose version` works), on Linux.
-- **`kubectl`** with access to a Kubernetes cluster (1.25+) that has a default
-  StorageClass.
+### Check your machine
+
+```bash
+infra-monitor doctor
+```
+
+`doctor` checks everything the stack needs and tells you how to fix whatever is
+missing:
+- **Docker Compose:** that Docker and the Compose plugin are installed, that
+  the Docker daemon is running and you're allowed to use it, and that the
+  stack's ports are free.
+- **Kubernetes:** that kubectl is installed, the cluster is reachable, you
+  have the permissions the stack needs, and there's a default StorageClass.
+
+`compose up` and `k8s apply` run the same checks first, so a missing
+prerequisite stops them with the fix instead of a confusing error halfway
+through.
+
+You need one of:
+- **Docker** with the Compose plugin, on Linux.
+- **`kubectl`** with access to a Kubernetes cluster (1.25+).
+
+### Tab completion
+
+Packages install it automatically. Otherwise:
+
+```bash
+infra-monitor completion bash | sudo tee /etc/bash_completion.d/infra-monitor   # bash
+infra-monitor completion zsh  > "${fpath[1]}/_infra-monitor"                    # zsh
+infra-monitor completion fish > ~/.config/fish/completions/infra-monitor.fish   # fish
+```
+
+### Uninstall
+
+Remove the binary: `sudo rm /usr/local/bin/infra-monitor` (or
+`~/.local/bin/infra-monitor`), or `sudo apt remove infra-monitor` /
+`sudo dnf remove infra-monitor` for packages.
+
+This doesn't touch your config or data. Stop the stack first with
+`infra-monitor compose down` or `infra-monitor k8s delete`, then delete
+`~/.infra-monitor` if you no longer want your settings.
 
 ## Quick start
 
@@ -149,6 +205,7 @@ infra-monitor compose up        # or: infra-monitor k8s apply
 | Scrape another metrics endpoint | `infra-monitor targets add web-2 10.0.0.6:9100` |
 | Set up alert channels | `infra-monitor notify setup` |
 | Send a test alert | `infra-monitor notify test` |
+| Check prerequisites | `infra-monitor doctor` |
 | See your settings (secrets hidden) | `infra-monitor config show` |
 | Apply changes on this host | `infra-monitor compose up` |
 | Apply changes on Kubernetes | `infra-monitor k8s apply` |
@@ -515,7 +572,8 @@ provide. Run the Compose stack on a Linux host.
 
 ```
 cmd/infra-monitor/   entrypoint
-internal/cli/        commands, wizard and menus
+internal/cli/        commands, wizard, menus and shell completion
+internal/doctor/     prerequisite checks for Docker and Kubernetes
 internal/prompt/     terminal prompts (hidden input for secrets)
 internal/config/     config.yaml: loading, validation, saving, .env migration
 internal/stack/      renders Prometheus, Alertmanager, Loki and Jaeger configs; rules; dashboards
@@ -537,6 +595,9 @@ make snapshot   # every release artifact into dist/, without publishing (needs g
 **CI** ([workflow](.github/workflows/ci.yml)) runs on every pull request:
 
 - **Unit tests**, including scripted runs of the interactive wizard and menu.
+- **Packaging:** shellcheck on every script; installs the `.deb`; runs
+  `install.sh` against the built release, including a tampered checksum
+  that must be rejected.
 - **Official config checkers** on configs that use every feature:
   `promtool`, `amtool`, `docker compose config` and a strict `kubeconform`.
 - **A Compose smoke test:** starts the stack and checks scrape targets, a
@@ -546,9 +607,10 @@ make snapshot   # every release artifact into dist/, without publishing (needs g
   checks every rollout, all scrape targets, kube-state-metrics data, logs in
   Loki, and that re-applying a change rolls Prometheus.
 
-**Releases:** pushing a tag like `v0.2.0` runs [GoReleaser](.goreleaser.yaml),
-which publishes binaries, `.deb`/`.rpm` packages and checksums to GitHub
-Releases. **Dependabot** opens weekly PRs for Go modules, GitHub Actions and
+**Releases:** open Actions → Release → Run workflow and enter a version like
+`v0.2.0`, or push that tag yourself. Either way, [GoReleaser](.goreleaser.yaml)
+publishes binaries, `.deb`/`.rpm` packages (with shell completion) and
+checksums to GitHub Releases. **Dependabot** opens weekly PRs for Go modules, GitHub Actions and
 the pinned images in `deploy/compose/docker-compose.yml`. Kubernetes reads its
 image versions from that file too, so one PR updates both backends.
 
