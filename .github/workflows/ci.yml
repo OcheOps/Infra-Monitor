@@ -18,7 +18,7 @@ jobs:
     steps:
       - run: echo "INFRA_MONITOR_DIR=$RUNNER_TEMP/im" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: gofmt
@@ -91,7 +91,7 @@ jobs:
     steps:
       - run: echo "INFRA_MONITOR_DIR=$RUNNER_TEMP/im" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: make build
@@ -128,7 +128,7 @@ jobs:
     steps:
       - run: echo "INFRA_MONITOR_DIR=$RUNNER_TEMP/im" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - uses: helm/kind-action@v1.10.0
