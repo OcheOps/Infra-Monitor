@@ -1,0 +1,41 @@
+[SERVICE]
+    Flush         5
+    Daemon        Off
+    Log_Level     info
+    Parsers_File  /etc/infra-monitor/parsers.conf
+
+[INPUT]
+    Name              tail
+    Path              /var/log/syslog,/var/log/messages
+    Tag               host.*
+    Refresh_Interval  5
+    DB                /fluent-bit/db/syslog.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+
+[INPUT]
+    Name              tail
+    Path              /var/lib/docker/containers/*/*.log
+    Parser            docker
+    Tag               containers.*
+    DB                /fluent-bit/db/containers.db
+    Refresh_Interval  5
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+{{ range .Outputs }}
+[OUTPUT]
+    Name         loki
+    Match        {{ .Match }}
+    Host         {{ $.Host }}
+    Port         {{ $.Port }}
+    Uri          /ingest/logs
+    tls          On
+    tls.verify   On
+    tls.vhost    {{ $.Host }}
+{{- if $.CA }}
+    tls.ca_file  /etc/infra-monitor/ca.crt
+{{- end }}
+    http_user    {{ $.Name }}
+    http_passwd  {{ $.Token }}
+    Labels       job={{ .Job }},host={{ $.Name }},agent={{ $.Name }}
+{{ end -}}

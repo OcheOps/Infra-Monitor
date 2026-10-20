@@ -43,6 +43,7 @@ jobs:
           bin/infra-monitor k8s configure --cluster-issuer letsencrypt
           bin/infra-monitor statuspage enable --title "CI status"
           bin/infra-monitor statuspage add tcp://db.local:5432 --name Database
+          bin/infra-monitor agent add web-2
           printf 'groups:\n  - name: custom\n    rules:\n      - alert: Custom\n        expr: up == 2\n' > "$INFRA_MONITOR_DIR/rules/custom.yml"
           echo '{"title":"Custom","panels":[]}' > "$INFRA_MONITOR_DIR/dashboards/custom.json"
       - name: Validate rendered configs
@@ -52,9 +53,16 @@ jobs:
           promtool check rules "$C"/alerts/*.yml
           sed "s#/etc/prometheus/rules#$C/alerts#" "$C/config/prometheus.yml" > prom.yml
           promtool check config prom.yml
+          cp .github/promtool/agents_test.yml "$C/alerts/"
+          (cd "$C/alerts" && promtool test rules agents_test.yml && rm agents_test.yml)
           amtool check-config "$C/config/alertmanager.yml"
           docker compose --project-directory "$C" -f "$C/docker-compose.yml" --env-file "$C/.env" config -q
           docker run --rm -v "$C/gateway:/etc/caddy:ro" caddy:2.8.4-alpine caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile
+          # Also without agents, the case most installs start in.
+          bin/infra-monitor agent remove web-2
+          bin/infra-monitor compose sync
+          docker run --rm -v "$C/gateway:/etc/caddy:ro" caddy:2.8.4-alpine caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile
+          bin/infra-monitor agent add web-2 >/dev/null
           bin/infra-monitor k8s render > k8s.yaml
           kubeconform -strict -summary -kubernetes-version 1.30.0 k8s.yaml
       - name: Shellcheck
@@ -145,11 +153,32 @@ jobs:
           curl -kfsS https://localhost/status/ | grep -q "<title>"
           curl -kfsS https://localhost/status/api/now | jq -e '.data.result | length == 1'
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost/)" = 308
+      - name: An agent on the same runner sends metrics and logs
+        run: |
+          echo "127.0.0.1 mon.test" | sudo tee -a /etc/hosts
+          bin/infra-monitor expose --domain mon.test --tls internal
+          bin/infra-monitor compose up
+          for _ in $(seq 30); do curl -kfsS -o /dev/null https://mon.test/api/health && break; sleep 2; done
+          bin/infra-monitor agent add ci-agent | tee add.txt
+          bin/infra-monitor compose up
+          join=$(grep -o 'infra-monitor agent join .*' add.txt)
+          # The agent's containers reach the server through the Docker host.
+          # shellcheck disable=SC2086
+          INFRA_MONITOR_DIR="$RUNNER_TEMP/agent" bin/${join} --server-ip host-gateway
+          INFRA_MONITOR_DIR="$RUNNER_TEMP/agent" bin/infra-monitor doctor
+          .github/scripts/wait-for-query.sh "curl -fsS" 'up{agent="ci-agent",job="node"}'
+          .github/scripts/wait-for-query.sh "curl -fsS" 'count(node_cpu_seconds_total{instance="ci-agent"})'
+          for _ in $(seq 30); do
+            curl -fsS http://localhost:3100/loki/api/v1/label/agent/values | jq -e '.data | index("ci-agent") != null' && exit 0
+            sleep 5
+          done
+          echo "no logs from ci-agent in Loki"; exit 1
       - name: Logs on failure
         if: failure()
         run: |
           bin/infra-monitor compose status
           docker compose -p infra-monitor logs --tail 50
+          docker compose -p infra-monitor-agent logs --tail 50 || true
 
   k8s-smoke:
     needs: test

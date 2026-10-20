@@ -28,6 +28,13 @@ Setup:
                                alert channels: telegram, slack, email, webhook
   config  show|path            print the config (secrets hidden) or its location
 
+Multiple servers:
+  agent add NAME               register another host; prints its join command
+  agent list|remove NAME       registered hosts and when each last reported
+  agent join URL --name N --token T
+                               (on the other host) send its metrics and logs here
+  agent leave                  (on an agent host) stop sending
+
 Public access:
   expose [--domain D] [off]    serve Grafana over HTTPS on your domain (Let's Encrypt)
   statuspage show|enable|disable|add|remove
@@ -66,6 +73,8 @@ type app struct {
 	interactive bool
 	// doctor runs prerequisite checks; nil skips them (tests).
 	doctor *doctor.Doctor
+	// gatewayCA overrides reading the gateway's CA certificate (tests).
+	gatewayCA func() ([]byte, error)
 }
 
 // Run executes the CLI and returns the process exit code.
@@ -110,9 +119,17 @@ func (a *app) run(args []string) error {
 	}
 
 	cmd, rest := rest[0], rest[1:]
+	if serverOnly[cmd] {
+		if cfg, err := config.Load(a.dir); err == nil && cfg.IsAgent() {
+			return fmt.Errorf("this host is agent %q of %s; `%s` settings live on the server (or run `infra-monitor agent leave`)",
+				cfg.Agent.Name, cfg.Agent.Server, cmd)
+		}
+	}
 	switch cmd {
 	case "init", "setup":
 		return a.cmdInit(rest)
+	case "agent", "agents":
+		return a.cmdAgent(rest)
 	case "expose":
 		return a.cmdExpose(rest)
 	case "statuspage", "status-page":
@@ -143,6 +160,13 @@ func (a *app) run(args []string) error {
 		global.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+}
+
+// serverOnly commands configure the full stack and make no sense on an agent.
+var serverOnly = map[string]bool{
+	"init": true, "setup": true, "probes": true, "probe": true, "urls": true, "targets": true, "target": true,
+	"notify": true, "notifications": true, "expose": true, "statuspage": true, "status-page": true,
+	"k8s": true, "kubernetes": true,
 }
 
 func defaultDir() string {
@@ -204,6 +228,12 @@ func (a *app) loadOrDefault() (config.Config, bool, error) {
 
 // save validates and writes the config, making sure a password exists.
 func (a *app) save(cfg config.Config) error {
+	if cfg.IsAgent() {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		return cfg.Save(a.dir)
+	}
 	if cfg.Grafana.AdminPassword == "" {
 		pw, err := config.GeneratePassword()
 		if err != nil {

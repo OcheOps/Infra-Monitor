@@ -1,0 +1,72 @@
+# Agent stack: collects this host's metrics and logs and sends them to an
+# Infra Monitor server. Written by `infra-monitor agent join`; nothing here
+# listens on the network.
+name: infra-monitor-agent
+
+x-restart: &restart
+  restart: unless-stopped
+
+# Resolves the server's hostname for hosts without DNS for it
+# (`agent join --server-ip`); a harmless placeholder otherwise.
+x-server-host: &server-host
+  extra_hosts:
+    - "${SERVER_HOST:-infra-monitor.invalid}:${SERVER_IP:-127.0.0.254}"
+
+networks:
+  agent:
+
+volumes:
+  prometheus-agent-data:
+  fluentbit-data:
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    <<: [*restart, *server-host]
+    networks: [agent]
+    command:
+      - --config.file=/etc/infra-monitor/prometheus.yml
+      - --enable-feature=agent
+      - --storage.agent.path=/prometheus
+    volumes:
+      - ./config:/etc/infra-monitor:ro,z
+      - prometheus-agent-data:/prometheus
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    <<: *restart
+    networks: [agent]
+    pid: host
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro,rslave
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    <<: *restart
+    networks: [agent]
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+
+  fluentbit:
+    image: cr.fluentbit.io/fluent/fluent-bit:3.1.7
+    <<: [*restart, *server-host]
+    networks: [agent]
+    command: /fluent-bit/bin/fluent-bit -c /etc/infra-monitor/fluent-bit.conf
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./config:/etc/infra-monitor:ro,z
+      - fluentbit-data:/fluent-bit/db

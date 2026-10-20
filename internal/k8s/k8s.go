@@ -129,7 +129,7 @@ func Render(cfg config.Config, extras stack.Extras, opts Options) ([]byte, error
 		}
 	}
 
-	ruleFiles, err := stack.Rules(stack.Kubernetes, extras)
+	ruleFiles, err := stack.Rules(stack.Kubernetes, extras, cfg.Agents)
 	if err != nil {
 		return nil, err
 	}

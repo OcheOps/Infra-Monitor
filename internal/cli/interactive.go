@@ -450,6 +450,7 @@ func (a *app) menu() error {
 		{"Scrape another metrics endpoint (add / remove targets)", a.menuTargets},
 		{"Alert notifications (Telegram, Slack, email, webhook)", a.menuNotify},
 		{"Public access over HTTPS and the status page", a.menuPublic},
+		{"Monitor another server (add an agent)", a.menuAgent},
 		{"Start or update on this host (Docker Compose)", func() error { return a.composeUp(false) }},
 		{"Deploy or update on Kubernetes", a.offerK8s},
 		{"Show status", a.menuStatus},
@@ -556,6 +557,22 @@ func (a *app) menuPublic() error {
 		return err
 	}
 	return a.cmdStatusPage([]string{"enable"})
+}
+
+func (a *app) menuAgent() error {
+	if err := a.agentList(); err != nil {
+		return err
+	}
+	name, err := a.p.Input("Name for the new server (blank to go back)", "", func(v string) error {
+		if v == "" {
+			return nil
+		}
+		return config.Target{Name: v, Address: "x:1"}.Validate()
+	})
+	if err != nil || name == "" {
+		return err
+	}
+	return a.agentAdd([]string{name})
 }
 
 func (a *app) menuStatus() error {

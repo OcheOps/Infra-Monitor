@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"slices"
 	"sort"
@@ -549,6 +550,16 @@ func orDefault(s, def string) string {
 // ---- compose ----------------------------------------------------------
 
 func (a *app) composeDir() string { return a.dir + "/compose" }
+func (a *app) agentDir() string   { return a.dir + "/agent" }
+func (a *app) caPath() string     { return a.dir + "/server-ca.crt" }
+
+// composeProject is the Compose project and directory for this host's mode.
+func (a *app) composeProject() (project, dir string) {
+	if cfg, err := a.load(); err == nil && cfg.IsAgent() {
+		return compose.AgentProjectName, a.agentDir()
+	}
+	return compose.ProjectName, a.composeDir()
+}
 
 func (a *app) cmdCompose(args []string) error {
 	if len(args) == 0 {
@@ -560,38 +571,64 @@ func (a *app) cmdCompose(args []string) error {
 	if err != nil {
 		return err
 	}
+	project, dir := a.composeProject()
 	switch sub {
 	case "up", "restart":
 		return a.composeUp(sub == "restart")
 	case "sync":
-		cfg, extras, err := a.loadAll()
-		if err != nil {
+		if _, err := a.syncProject(); err != nil {
 			return err
 		}
-		if _, err := compose.Sync(a.composeDir(), cfg, extras); err != nil {
-			return err
-		}
-		fmt.Fprintf(a.stdout, "Compose project written to %s (not started).\n", a.composeDir())
+		fmt.Fprintf(a.stdout, "Compose project written to %s (not started).\n", dir)
 		return nil
 	case "down":
-		return compose.Command(a.composeDir(), "down").Run()
+		return compose.Command(project, dir, "down").Run()
 	case "status", "ps":
-		return compose.Command(a.composeDir(), "ps").Run()
+		return compose.Command(project, dir, "ps").Run()
 	case "logs":
-		return compose.Command(a.composeDir(), append([]string{"logs", "--follow", "--tail", "100"}, pos...)...).Run()
+		return compose.Command(project, dir, append([]string{"logs", "--follow", "--tail", "100"}, pos...)...).Run()
 	default:
 		return fmt.Errorf("unknown compose command %q", sub)
 	}
 }
 
-func (a *app) composeUp(restartOnly bool) error {
+// syncProject writes the Compose project for this host's mode and reports
+// whether existing files changed.
+func (a *app) syncProject() (bool, error) {
+	cfg, err := a.load()
+	if err != nil {
+		return false, err
+	}
+	if cfg.IsAgent() {
+		ca, err := os.ReadFile(a.caPath())
+		if errors.Is(err, os.ErrNotExist) {
+			ca = nil
+		} else if err != nil {
+			return false, err
+		}
+		if cfg.Agent.CASHA256 != "" && ca == nil {
+			return false, fmt.Errorf("the server's CA certificate is missing (%s); run `infra-monitor agent join` again", a.caPath())
+		}
+		return compose.SyncAgent(a.agentDir(), cfg, ca)
+	}
 	cfg, extras, err := a.loadAll()
+	if err != nil {
+		return false, err
+	}
+	return compose.Sync(a.composeDir(), cfg, extras)
+}
+
+func (a *app) composeUp(restartOnly bool) error {
+	cfg, err := a.load()
 	if err != nil {
 		return err
 	}
-	dir := a.composeDir()
+	project, dir := a.composeProject()
 	if err := a.preflight(func(d *doctor.Doctor) []doctor.Check {
-		running := a.composeRunning()
+		running := a.composeRunning(project)
+		if cfg.IsAgent() {
+			return d.Compose(true) // agents publish no ports
+		}
 		checks := d.Compose(running)
 		if g := cfg.Gateway; g.Domain != "" {
 			checks = append(checks, d.Public(publicHosts(cfg), g.TLS == "internal", running)...)
@@ -600,21 +637,25 @@ func (a *app) composeUp(restartOnly bool) error {
 	}); err != nil {
 		return err
 	}
-	changed, err := compose.Sync(dir, cfg, extras)
+	changed, err := a.syncProject()
 	if err != nil {
 		return err
 	}
 	if restartOnly {
-		return compose.Command(dir, "restart").Run()
+		return compose.Command(project, dir, "restart").Run()
 	}
-	if err := compose.Command(dir, "up", "-d", "--remove-orphans").Run(); err != nil {
+	if err := compose.Command(project, dir, "up", "-d", "--remove-orphans").Run(); err != nil {
 		return err
 	}
 	if changed {
 		// Bind-mounted config files changed; `up -d` alone doesn't reload them.
-		if err := compose.Command(dir, "restart").Run(); err != nil {
+		if err := compose.Command(project, dir, "restart").Run(); err != nil {
 			return err
 		}
+	}
+	if cfg.IsAgent() {
+		fmt.Fprintf(a.stdout, "\nAgent %s is sending metrics and logs to %s.\n", cfg.Agent.Name, cfg.Agent.Server)
+		return nil
 	}
 	a.printComposeEndpoints(cfg)
 	return nil
@@ -818,6 +859,10 @@ func (a *app) cmdDoctor(args []string) error {
 		return fmt.Errorf("usage: infra-monitor doctor [compose|k8s]")
 	}
 
+	if cfg, err := a.load(); err == nil && cfg.IsAgent() {
+		return a.doctorAgent(d, cfg)
+	}
+
 	cfg, _, err := a.loadOrDefault()
 	switch {
 	case err != nil:
@@ -836,9 +881,10 @@ func (a *app) cmdDoctor(args []string) error {
 
 	var composeOK, k8sOK bool
 	if which == "all" || which == "compose" {
-		running := a.composeRunning()
-		checks := d.Compose(running)
-		if g := cfg.Gateway; g.Domain != "" {
+		project, _ := a.composeProject()
+		running := a.composeRunning(project)
+		checks := d.Compose(running || cfg.IsAgent())
+		if g := cfg.Gateway; g.Domain != "" && !cfg.IsAgent() {
 			checks = append(checks, d.Public(publicHosts(cfg), g.TLS == "internal", running)...)
 		}
 		doctor.Print(a.stdout, "Docker Compose (this host)", checks)
@@ -879,9 +925,9 @@ func (a *app) preflight(checks func(*doctor.Doctor) []doctor.Check) error {
 	return doctor.FirstFailure(checks(a.doctor))
 }
 
-// composeRunning reports whether the Infra Monitor containers are up.
-func (a *app) composeRunning() bool {
-	out, err := exec.Command("docker", "compose", "--project-name", compose.ProjectName, "ps", "-q").Output()
+// composeRunning reports whether a Compose project's containers are up.
+func (a *app) composeRunning(project string) bool {
+	out, err := exec.Command("docker", "compose", "--project-name", project, "ps", "-q").Output()
 	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
@@ -892,4 +938,27 @@ func publicHosts(cfg config.Config) []string {
 		hosts = append(hosts, sd)
 	}
 	return hosts
+}
+
+// doctorAgent checks an agent host: Docker, and that the server accepts
+// this agent's credentials.
+func (a *app) doctorAgent(d *doctor.Doctor, cfg config.Config) error {
+	ag := *cfg.Agent
+	fmt.Fprintf(a.stdout, "Agent %q of %s\n\n", ag.Name, ag.Server)
+	checks := d.Compose(true) // agents publish no ports
+	ca, _ := os.ReadFile(a.caPath())
+	if ag.CASHA256 != "" && ca == nil {
+		checks = append(checks, doctor.Check{Name: "Server CA certificate", Status: doctor.Fail,
+			Detail: "missing " + a.caPath(), Fix: "Run `infra-monitor agent join` again"})
+	} else if err := pingServer(ag, ca); err != nil {
+		checks = append(checks, doctor.Check{Name: "Server accepts this agent", Status: doctor.Fail, Detail: err.Error()})
+	} else {
+		checks = append(checks, doctor.Check{Name: "Server accepts this agent", Status: doctor.OK})
+	}
+	doctor.Print(a.stdout, "Agent", checks)
+	if doctor.Failed(checks) {
+		return errors.New("the agent can't send data; see the fixes above")
+	}
+	fmt.Fprintln(a.stdout, "\nReady.")
+	return nil
 }

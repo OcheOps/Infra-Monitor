@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -17,7 +18,12 @@ import (
 	"github.com/OcheOps/Infra-Monitor/internal/stack"
 )
 
-const ProjectName = "infra-monitor"
+// Compose project names. They differ so a server and an agent can share a
+// host (CI does, to test them together).
+const (
+	ProjectName      = "infra-monitor"
+	AgentProjectName = "infra-monitor-agent"
+)
 
 // EnvFile is the generated Compose env file inside the project directory.
 const EnvFile = ".env"
@@ -76,7 +82,7 @@ func Sync(dir string, cfg config.Config, extras stack.Extras) (changed bool, err
 		files[name] = b
 	}
 
-	rules, err := stack.Rules(stack.Compose, extras)
+	rules, err := stack.Rules(stack.Compose, extras, cfg.Agents)
 	if err != nil {
 		return false, err
 	}
@@ -152,10 +158,10 @@ func writeFile(dir, rel string, data []byte, mode os.FileMode) (bool, error) {
 }
 
 // Command builds a `docker compose` invocation for the project in dir.
-func Command(dir string, args ...string) *exec.Cmd {
+func Command(project, dir string, args ...string) *exec.Cmd {
 	full := append([]string{
 		"compose",
-		"--project-name", ProjectName,
+		"--project-name", project,
 		"--project-directory", dir,
 		"--file", filepath.Join(dir, "docker-compose.yml"),
 		"--env-file", filepath.Join(dir, EnvFile),
@@ -163,4 +169,62 @@ func Command(dir string, args ...string) *exec.Cmd {
 	cmd := exec.Command("docker", full...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd
+}
+
+// SyncAgent writes an agent host's Compose project into dir. ca is the
+// server's CA certificate when it is pinned (`expose --tls internal`).
+func SyncAgent(dir string, cfg config.Config, ca []byte) (changed bool, err error) {
+	if err := cfg.Validate(); err != nil {
+		return false, err
+	}
+	if cfg.Agent == nil {
+		return false, errors.New("this host is not an agent")
+	}
+	ag := *cfg.Agent
+	files, err := stack.AgentFiles(ag, ca != nil)
+	if err != nil {
+		return false, err
+	}
+	compose, err := deploy.FS.ReadFile("agent/docker-compose.yml")
+	if err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false, err
+	}
+	write := func(rel string, data []byte, mode os.FileMode) error {
+		c, err := writeFile(dir, rel, data, mode)
+		changed = changed || c
+		return err
+	}
+	if err := write("docker-compose.yml", compose, 0o644); err != nil {
+		return changed, err
+	}
+	for name, data := range files {
+		// The containers run as non-root users and read these through the
+		// 0700 project directory.
+		if err := write("config/"+name, data, 0o644); err != nil {
+			return changed, err
+		}
+	}
+	if ca != nil {
+		if err := write("config/ca.crt", ca, 0o644); err != nil {
+			return changed, err
+		}
+	} else if err := os.Remove(filepath.Join(dir, "config", "ca.crt")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return changed, err
+	}
+
+	env := ""
+	if ag.ServerIP != "" {
+		u, err := url.Parse(ag.Server)
+		if err != nil {
+			return changed, err
+		}
+		env = fmt.Sprintf("SERVER_HOST=%s\nSERVER_IP=%s\n", u.Hostname(), ag.ServerIP)
+	}
+	if err := write(EnvFile, []byte(env), 0o600); err != nil {
+		return changed, err
+	}
+	return changed, nil
 }
