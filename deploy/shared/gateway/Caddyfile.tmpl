@@ -1,0 +1,81 @@
+# Rendered by infra-monitor. Routes:
+#   /          -> Grafana (its own login)
+#   /status/   -> public status page (when enabled)
+{
+	admin off
+{{- with .Email }}
+	email {{ . }}
+{{- end }}
+{{- if not .HTTPS }}
+	auto_https off
+{{- end }}
+}
+
+# The status page only ever runs these fixed queries. It must never pass a
+# client's own query to Prometheus, which also reads one from a POST body.
+# So: `route` runs these in the order written (outside it, Caddy would run
+# `handle` before `respond`), anything but GET/HEAD is refused, bodies are
+# capped at zero, and Prometheus is always called with GET.
+(statuspage) {
+	route {
+		@notget not method GET HEAD
+		respond @notget "Method not allowed" 405
+		request_body {
+			max_size 0
+		}
+{{- range $name, $q := .Queries }}
+		handle /api/{{ $name }} {
+			rewrite * /api/v1/query?query={{ $q }}
+			reverse_proxy prometheus:9090 {
+				method GET
+			}
+		}
+{{- end }}
+		handle /api/* {
+			respond 404
+		}
+		handle {
+			root * /srv/status
+			header Cache-Control "public, max-age=60"
+			file_server
+		}
+	}
+}
+
+(common) {
+	encode zstd gzip
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+{{- if .HTTPS }}
+		Strict-Transport-Security "max-age=31536000"
+{{- end }}
+	}
+}
+
+{{ .Site }} {
+{{- if .InternalTLS }}
+	tls internal
+{{- end }}
+	import common
+{{- if .StatusPage }}
+	redir /status /status/ 308
+	handle_path /status/* {
+		import statuspage
+	}
+{{- end }}
+	handle {
+		reverse_proxy grafana:3000
+	}
+}
+{{- if and .StatusPage .StatusSite }}
+
+{{ .StatusSite }} {
+{{- if .InternalTLS }}
+	tls internal
+{{- end }}
+	import common
+	import statuspage
+}
+{{- end }}

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Status</title>
+<style>
+  :root {
+    --bg: #f7f8fa; --card: #ffffff; --text: #1d2330; --muted: #667085; --border: #e4e7ec;
+    --up: #12b76a; --warn: #f79009; --down: #f04438; --none: #d0d5dd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --card: #171b24; --text: #e6e8ee; --muted: #98a2b3; --border: #262c38;
+      --none: #343b49;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: 24px; margin: 0 0 24px; }
+  .banner {
+    display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-radius: 12px;
+    color: #fff; font-weight: 600; margin-bottom: 28px; background: var(--none);
+  }
+  .banner.up { background: var(--up); } .banner.warn { background: var(--warn); } .banner.down { background: var(--down); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .monitor { padding: 18px 20px; border-top: 1px solid var(--border); }
+  .monitor:first-child { border-top: 0; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .name { font-weight: 600; overflow-wrap: anywhere; }
+  .meta { color: var(--muted); font-size: 13px; display: flex; gap: 14px; align-items: center; }
+  .pill { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; color: #fff; background: var(--none); }
+  .pill.up { background: var(--up); } .pill.down { background: var(--down); }
+  .bars { display: grid; grid-template-columns: repeat(30, 1fr); gap: 3px; margin-top: 12px; height: 28px; }
+  .bar { border-radius: 3px; background: var(--none); }
+  .bar.up { background: var(--up); } .bar.warn { background: var(--warn); } .bar.down { background: var(--down); }
+  .scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .empty { padding: 28px 20px; color: var(--muted); text-align: center; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 28px; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Status</h1>
+  <div id="banner" class="banner"><span id="banner-text">Loading…</span></div>
+  <div id="monitors" class="card"></div>
+  <footer>Updated <span id="updated">–</span> · refreshes every minute</footer>
+</main>
+<script>
+"use strict";
+const DAYS = 30;
+
+async function getJSON(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(path + ": " + r.status);
+  return r.json();
+}
+
+// byInstance maps each series' instance label to its value(s).
+function byInstance(resp, matrix) {
+  const out = {};
+  for (const s of (resp && resp.data && resp.data.result) || []) {
+    out[s.metric.instance] = matrix ? s.values : parseFloat(s.value[1]);
+  }
+  return out;
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function level(ratio) {
+  if (ratio === undefined || isNaN(ratio)) return "";
+  if (ratio >= 0.999) return "up";
+  if (ratio >= 0.95) return "warn";
+  return "down";
+}
+
+function fmtPct(r) {
+  return r === undefined || isNaN(r) ? "–" : (Math.floor(r * 10000) / 100).toFixed(2) + "%";
+}
+
+function fmtMs(s) {
+  return s === undefined || isNaN(s) ? "–" : Math.round(s * 1000) + " ms";
+}
+
+async function refresh() {
+  const cfg = await getJSON("config.json");
+  document.title = cfg.title;
+  document.getElementById("title").textContent = cfg.title;
+  const list = document.getElementById("monitors");
+
+  if (!cfg.monitors.length) {
+    list.replaceChildren(el("div", "empty", "No services are listed on this page yet."));
+    setBanner("", "No services listed");
+    return;
+  }
+
+  const [now, latency, uptime, history, day] = await Promise.all(
+    ["now", "latency", "uptime", "history", "day"].map(n => getJSON("api/" + n).catch(() => null)));
+  const up = byInstance(now), lat = byInstance(latency), upt = byInstance(uptime),
+        hist = byInstance(history, true), last24h = byInstance(day);
+
+  // Daily buckets: the last DAYS days ending today, keyed by UTC day number.
+  const today = Math.floor(Date.now() / 86400000);
+  let down = 0, unknown = 0;
+  const rows = cfg.monitors.map(m => {
+    const state = up[m.instance];
+    if (state === undefined) unknown++; else if (state < 1) down++;
+
+    const card = el("div", "monitor");
+    const row = el("div", "row");
+    row.append(el("span", "name", m.name));
+    const meta = el("span", "meta");
+    meta.append(el("span", "", fmtMs(lat[m.instance])));
+    meta.append(el("span", "", fmtPct(upt[m.instance]) + " uptime"));
+    const pill = el("span", "pill " + (state === undefined ? "" : state >= 1 ? "up" : "down"),
+      state === undefined ? "No data" : state >= 1 ? "Operational" : "Down");
+    meta.append(pill);
+    row.append(meta);
+    card.append(row);
+
+    const days = {};
+    // Each history sample averages the day before its (midnight UTC) timestamp;
+    // today's bar uses the rolling last 24 hours.
+    for (const [ts, v] of hist[m.instance] || []) days[Math.floor(ts / 86400) - 1] = parseFloat(v);
+    if (last24h[m.instance] !== undefined) days[today] = last24h[m.instance];
+    const bars = el("div", "bars");
+    for (let d = today - DAYS + 1; d <= today; d++) {
+      const b = el("div", "bar " + level(days[d]));
+      const date = new Date(d * 86400000).toISOString().slice(0, 10);
+      b.title = date + ": " + (days[d] === undefined ? "no data" : fmtPct(days[d]));
+      bars.append(b);
+    }
+    card.append(bars);
+    const scale = el("div", "scale");
+    scale.append(el("span", "", DAYS + " days ago"), el("span", "", "Today"));
+    card.append(scale);
+    return card;
+  });
+  list.replaceChildren(...rows);
+
+  if (down) setBanner("down", down === 1 ? "1 service is down" : down + " services are down");
+  else if (unknown === cfg.monitors.length) setBanner("", "Waiting for the first checks…");
+  else if (unknown) setBanner("warn", "Some services have no recent data");
+  else setBanner("up", "All systems operational");
+  document.getElementById("updated").textContent = new Date().toLocaleTimeString();
+}
+
+function setBanner(cls, text) {
+  document.getElementById("banner").className = "banner " + cls;
+  document.getElementById("banner-text").textContent = text;
+}
+
+refresh().catch(e => setBanner("down", "Could not load status: " + e.message));
+setInterval(() => refresh().catch(() => {}), 60000);
+</script>
+</body>
+</html>

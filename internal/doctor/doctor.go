@@ -45,6 +45,8 @@ type Doctor struct {
 	PortFree func(port int) bool
 	GOOS     string
 	Timeout  time.Duration
+	// Resolve looks up a hostname's addresses.
+	Resolve func(host string) ([]string, error)
 }
 
 func New() *Doctor {
@@ -64,6 +66,7 @@ func New() *Doctor {
 		},
 		GOOS:    runtime.GOOS,
 		Timeout: 15 * time.Second,
+		Resolve: net.LookupHost,
 	}
 }
 
@@ -134,6 +137,48 @@ func (d *Doctor) Compose(stackRunning bool) []Check {
 			"Stop whatever is using them (`sudo ss -ltnp` shows which process)"})
 	} else {
 		checks = append(checks, Check{Name: "Ports free on 127.0.0.1", Status: OK})
+	}
+	return checks
+}
+
+// Public checks what serving a public domain from this host needs: DNS for
+// each hostname and free ports 80/443 (unless the stack already holds them).
+func (d *Doctor) Public(hosts []string, internalTLS, stackRunning bool) []Check {
+	var checks []Check
+	for _, h := range hosts {
+		if h == "localhost" {
+			continue
+		}
+		resolve := d.Resolve
+		if resolve == nil {
+			resolve = net.LookupHost
+		}
+		addrs, err := resolve(h)
+		switch {
+		case err != nil || len(addrs) == 0:
+			status := Fail
+			if internalTLS {
+				status = Warn
+			}
+			checks = append(checks, Check{"DNS for " + h, status, "does not resolve",
+				"Create an A/AAAA record for " + h + " pointing at this server's public IP"})
+		default:
+			checks = append(checks, Check{"DNS for " + h, OK, strings.Join(addrs, ", "), ""})
+		}
+	}
+	if !stackRunning {
+		var busy []string
+		for _, p := range []int{80, 443} {
+			if !d.PortFree(p) {
+				busy = append(busy, fmt.Sprint(p))
+			}
+		}
+		if len(busy) > 0 {
+			checks = append(checks, Check{"Ports 80/443 free", Fail, "in use: " + strings.Join(busy, ", "),
+				"Stop the web server using them (often nginx or Apache), or put this stack behind it instead"})
+		} else {
+			checks = append(checks, Check{Name: "Ports 80/443 free", Status: OK})
+		}
 	}
 	return checks
 }

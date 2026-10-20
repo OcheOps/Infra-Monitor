@@ -38,6 +38,7 @@ Start the stack now?
 - [Quick start](#quick-start)
 - [Everyday commands](#everyday-commands)
 - [Checking websites and services](#checking-websites-and-services)
+- [Public access and status page](#public-access-and-status-page)
 - [Alerts and notifications](#alerts-and-notifications)
 - [Running on a single host](#running-on-a-single-host-docker-compose)
 - [Running on Kubernetes](#running-on-kubernetes)
@@ -206,6 +207,8 @@ infra-monitor compose up        # or: infra-monitor k8s apply
 | Set up alert channels | `infra-monitor notify setup` |
 | Send a test alert | `infra-monitor notify test` |
 | Check prerequisites | `infra-monitor doctor` |
+| Put Grafana on your domain over HTTPS | `infra-monitor expose --domain mon.example.com` |
+| Publish a status page | `infra-monitor statuspage enable` |
 | See your settings (secrets hidden) | `infra-monitor config show` |
 | Apply changes on this host | `infra-monitor compose up` |
 | Apply changes on Kubernetes | `infra-monitor k8s apply` |
@@ -228,6 +231,55 @@ infra-monitor probes add tcp://db.internal:5432     # TCP: is the port accepting
 
 Every check alerts you when it fails for 2 minutes, when it's slow (over 5
 seconds on average), and when its TLS certificate expires within 14 days.
+
+## Public access and status page
+
+Grafana and the stack listen only on `localhost` at first. To reach Grafana
+from anywhere, and to publish a status page for your users:
+
+```bash
+infra-monitor expose --domain mon.example.com          # Grafana at https://mon.example.com
+infra-monitor statuspage enable --title "Acme status"  # page at https://mon.example.com/status/
+infra-monitor compose up                               # apply
+```
+
+![Status page](docs/images/status-page.png)
+
+- **HTTPS is automatic.** The gateway ([Caddy](https://caddyserver.com)) gets
+  and renews a Let's Encrypt certificate. Point the domain's DNS at the server
+  and open ports 80 and 443 first; `infra-monitor doctor` checks both.
+- **No public DNS?** Use `--tls internal` for a self-signed certificate on a
+  home or office network. Browsers will show a warning you can accept.
+- **Grafana stays behind its own login.** Prometheus, Loki, Alertmanager and
+  Jaeger aren't exposed at all.
+- **A separate status domain:** add `--status-domain status.example.com` to
+  serve the page at the root of its own domain as well.
+- **Turn it off** with `infra-monitor expose off`.
+
+### Choosing what the status page shows
+
+The page only shows checks you pick, under names you choose:
+
+```bash
+infra-monitor statuspage add https://shop.example.com --name "Shop"
+infra-monitor statuspage add tcp://db.internal:5432 --name "Database"
+infra-monitor statuspage remove tcp://db.internal:5432
+infra-monitor statuspage show
+```
+
+`statuspage enable` adds your HTTP(S) checks to start with; TCP checks are
+left off because they're often internal. Each service shows whether it's up,
+its response time, 30-day uptime and a bar for each of the last 30 days. The
+page works in light and dark mode and refreshes every minute.
+
+**What visitors can see:** the page runs a fixed set of queries for just the
+checks you listed. Visitors can't send their own Prometheus queries; anything
+other than a plain GET is refused. They do see the URLs of the listed checks,
+in the page's data.
+
+Before you expose it, the page is at http://localhost:8081/status/. On
+Kubernetes, the Ingress serves your domain and the gateway sits behind it
+(`infra-monitor k8s port-forward gateway 8081` to view it locally).
 
 ## Alerts and notifications
 
@@ -327,6 +379,7 @@ reachable from other machines by default:
 | Jaeger UI    | http://localhost:16686 |
 | Loki         | http://localhost:3100  |
 | cAdvisor     | http://localhost:8080  |
+| Gateway / status page | http://localhost:8081/status/ (or your domain, see [Public access](#public-access-and-status-page)) |
 
 To reach Grafana from another machine, use an SSH tunnel
 (`ssh -L 3000:localhost:3000 your-server`) or a reverse proxy with TLS.
@@ -337,7 +390,7 @@ To reach Grafana from another machine, use an SSH tunnel
 infra-monitor k8s configure           # namespace, storage, ingress (guided, or use flags)
 infra-monitor k8s apply               # deploy or update
 infra-monitor k8s status              # pods, services, volumes, ingress
-infra-monitor k8s port-forward grafana [PORT]   # also: prometheus, alertmanager, jaeger, loki
+infra-monitor k8s port-forward grafana [PORT]   # also: prometheus, alertmanager, jaeger, loki, gateway
 infra-monitor k8s render > stack.yaml # print the manifests instead of applying them
 infra-monitor k8s delete              # remove the stack, keep the data volumes
 infra-monitor k8s delete --purge      # also delete the namespace and all data

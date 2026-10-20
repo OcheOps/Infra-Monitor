@@ -2,6 +2,7 @@ package stack
 
 import (
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -256,3 +257,83 @@ func TestLoadExtrasMissingDirs(t *testing.T) {
 // fake returns a placeholder credential for tests. It is built at runtime so
 // secret scanners don't mistake test fixtures for real credentials.
 func fake(s string) string { return "fake-" + s }
+
+func gatewayConfig() config.Config {
+	c := testConfig()
+	c.StatusPage = config.StatusPage{Enabled: true, Title: "Acme", Monitors: []config.Monitor{
+		{Probe: "https://example.com/health", Name: "Website"}, {Probe: "tcp://db.local:5432", Name: "DB"}}}
+	return c
+}
+
+func TestGatewayConfig(t *testing.T) {
+	c := gatewayConfig()
+	local, err := GatewayConfig(Compose, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(local)
+	// The status page must never forward a client's own query: these are the
+	// guards against POST-body and parameter injection.
+	for _, want := range []string{
+		":80 {", "auto_https off", "route {", "@notget not method GET HEAD", `respond @notget "Method not allowed" 405`,
+		"max_size 0", "method GET", "handle /api/now", "handle /api/history", "reverse_proxy grafana:3000",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("local Caddyfile missing %q", want)
+		}
+	}
+	if strings.Index(s, "respond @notget") > strings.Index(s, "handle /api/") {
+		t.Error("the method check must come before the API handlers")
+	}
+
+	c.Gateway = config.Gateway{Domain: "mon.example.com", StatusDomain: "status.example.com", TLS: "internal", Email: "ops@example.com"}
+	pub, _ := GatewayConfig(Compose, c)
+	for _, want := range []string{"mon.example.com {", "status.example.com {", "tls internal", "email ops@example.com", "Strict-Transport-Security"} {
+		if !strings.Contains(string(pub), want) {
+			t.Errorf("public Caddyfile missing %q", want)
+		}
+	}
+	if strings.Contains(string(pub), "auto_https off") {
+		t.Error("public Caddyfile must keep automatic HTTPS")
+	}
+
+	k8s, _ := GatewayConfig(Kubernetes, c)
+	if !strings.Contains(string(k8s), ":80 {") || !strings.Contains(string(k8s), "http://status.example.com {") || strings.Contains(string(k8s), "tls internal") {
+		t.Errorf("k8s Caddyfile should serve plain HTTP (TLS is at the Ingress):\n%s", k8s)
+	}
+
+	c.StatusPage.Enabled = false
+	off, _ := GatewayConfig(Compose, c)
+	if strings.Contains(string(off), "handle_path /status/") || strings.Contains(string(off), "prometheus:9090") {
+		t.Error("status page routes rendered while it's disabled")
+	}
+}
+
+func TestStatusQueries(t *testing.T) {
+	q := StatusQueries(gatewayConfig())
+	if len(q) != 5 {
+		t.Fatalf("queries = %v", q)
+	}
+	now, err := url.QueryUnescape(q["now"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Regex metacharacters in URLs are escaped, and TCP probes match host:port.
+	want := `probe_success{job=~"blackbox|blackbox-tcp",instance=~"https://example\\.com/health|db\\.local:5432"}`
+	if now != want {
+		t.Errorf("now query\n got: %s\nwant: %s", now, want)
+	}
+	if hist, _ := url.QueryUnescape(q["history"]); !strings.HasSuffix(hist, "[1d])[30d:1d]") {
+		t.Errorf("history query = %s", hist)
+	}
+
+	c := gatewayConfig()
+	c.StatusPage.Monitors = nil
+	if len(StatusQueries(c)) != 0 {
+		t.Error("queries rendered for an empty page")
+	}
+	js, _ := StatusPageJSON(gatewayConfig())
+	if !strings.Contains(string(js), `"instance": "db.local:5432"`) || strings.Contains(string(js), "tcp://") {
+		t.Errorf("status JSON = %s", js)
+	}
+}

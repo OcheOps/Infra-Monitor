@@ -24,7 +24,7 @@ const EnvFile = ".env"
 
 // managedDirs hold only files the CLI writes; anything else in them is
 // removed on sync, so deleted custom rules and dashboards disappear.
-var managedDirs = []string{"alerts", "provisioning/dashboards"}
+var managedDirs = []string{"alerts", "provisioning/dashboards", "gateway/status"}
 
 // Sync writes the compose project into dir, replacing files the CLI owns.
 // It reports whether a file that already existed changed, meaning running
@@ -59,10 +59,15 @@ func Sync(dir string, cfg config.Config, extras stack.Extras) (changed bool, err
 	}
 
 	for name, render := range map[string]func() ([]byte, error){
-		"config/prometheus.yml":   func() ([]byte, error) { return stack.PrometheusConfig(stack.Compose, d) },
-		"config/alertmanager.yml": func() ([]byte, error) { return stack.AlertmanagerConfig(cfg) },
-		"config/loki.yaml":        func() ([]byte, error) { return stack.LokiConfig(d) },
-		"config/jaeger.yaml":      func() ([]byte, error) { return stack.JaegerConfig(d) },
+		"config/prometheus.yml":      func() ([]byte, error) { return stack.PrometheusConfig(stack.Compose, d) },
+		"config/alertmanager.yml":    func() ([]byte, error) { return stack.AlertmanagerConfig(cfg) },
+		"config/loki.yaml":           func() ([]byte, error) { return stack.LokiConfig(d) },
+		"config/jaeger.yaml":         func() ([]byte, error) { return stack.JaegerConfig(d) },
+		"gateway/Caddyfile":          func() ([]byte, error) { return stack.GatewayConfig(stack.Compose, cfg) },
+		"gateway/status/config.json": func() ([]byte, error) { return stack.StatusPageJSON(cfg) },
+		"gateway/status/index.html": func() ([]byte, error) {
+			return deploy.FS.ReadFile("shared/gateway/status/index.html")
+		},
 	} {
 		b, err := render()
 		if err != nil {
@@ -96,7 +101,12 @@ func Sync(dir string, cfg config.Config, extras stack.Extras) (changed bool, err
 		}
 		changed = changed || c
 	}
-	env := fmt.Sprintf("GRAFANA_ADMIN_PASSWORD='%s'\nPROMETHEUS_RETENTION=%dh\n", cfg.Grafana.AdminPassword, d.Retention.Metrics)
+	gwHTTP, gwHTTPS, rootURL := "127.0.0.1:8081", "127.0.0.1:8443", "http://localhost:3000/"
+	if dom := cfg.Gateway.Domain; dom != "" {
+		gwHTTP, gwHTTPS, rootURL = "80", "443", "https://"+dom+"/"
+	}
+	env := fmt.Sprintf("GRAFANA_ADMIN_PASSWORD='%s'\nPROMETHEUS_RETENTION=%dh\nGATEWAY_HTTP=%s\nGATEWAY_HTTPS=%s\nGRAFANA_ROOT_URL=%s\n",
+		cfg.Grafana.AdminPassword, d.Retention.Metrics, gwHTTP, gwHTTPS, rootURL)
 	if _, err := writeFile(dir, EnvFile, []byte(env), 0o600); err != nil {
 		return changed, err
 	}

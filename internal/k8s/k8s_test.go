@@ -38,6 +38,18 @@ type object struct {
 	Data       map[string]string `yaml:"data"`
 	StringData map[string]string `yaml:"stringData"`
 	Spec       struct {
+		Rules []struct {
+			Host string `yaml:"host"`
+			HTTP struct {
+				Paths []struct {
+					Backend struct {
+						Service struct {
+							Name string `yaml:"name"`
+						} `yaml:"service"`
+					} `yaml:"backend"`
+				} `yaml:"paths"`
+			} `yaml:"http"`
+		} `yaml:"rules"`
 		IngressClassName string `yaml:"ingressClassName"`
 		TLS              []struct {
 			Hosts      []string `yaml:"hosts"`
@@ -137,12 +149,13 @@ func TestRender(t *testing.T) {
 		"DaemonSet/node-exporter", "Deployment/kube-state-metrics", "Deployment/blackbox",
 		"StatefulSet/loki", "DaemonSet/fluent-bit", "StatefulSet/jaeger", "ClusterRole/mon-prometheus",
 		"ClusterRole/mon-kube-state-metrics", "ConfigMap/prometheus-rules", "ConfigMap/loki-config", "ConfigMap/jaeger-config",
+		"Deployment/gateway", "Service/gateway", "ConfigMap/gateway-config",
 	} {
 		if _, ok := objs[k]; !ok {
 			t.Errorf("missing %s", k)
 		}
 	}
-	if _, ok := objs["Ingress/grafana"]; ok {
+	if _, ok := objs["Ingress/gateway"]; ok {
 		t.Error("Ingress rendered without a host")
 	}
 
@@ -188,7 +201,7 @@ func TestRenderIngress(t *testing.T) {
 	cfg := testConfig()
 	cfg.Kubernetes.Ingress = config.Ingress{Host: "grafana.example.com", ClassName: "nginx", ClusterIssuer: "letsencrypt"}
 	objs := render(t, cfg, stack.Extras{}, Options{})
-	in, ok := objs["Ingress/grafana"]
+	in, ok := objs["Ingress/gateway"]
 	if !ok {
 		t.Fatal("no Ingress")
 	}
@@ -204,7 +217,7 @@ func TestRenderIngress(t *testing.T) {
 
 	cfg.Kubernetes.Ingress = config.Ingress{Host: "grafana.example.com"}
 	objs = render(t, cfg, stack.Extras{}, Options{})
-	if len(objs["Ingress/grafana"].Spec.TLS) != 0 || !hasEnv(objs["StatefulSet/grafana"], "GF_SERVER_ROOT_URL", "http://grafana.example.com/") {
+	if len(objs["Ingress/gateway"].Spec.TLS) != 0 || !hasEnv(objs["StatefulSet/grafana"], "GF_SERVER_ROOT_URL", "http://grafana.example.com/") {
 		t.Error("plain-HTTP ingress rendered wrongly")
 	}
 }
@@ -297,3 +310,35 @@ func keys(m map[string]string) []string {
 // fake returns a placeholder credential for tests. It is built at runtime so
 // secret scanners don't mistake test fixtures for real credentials.
 func fake(s string) string { return "fake-" + s }
+
+func TestRenderGatewayAndStatusDomain(t *testing.T) {
+	cfg := testConfig()
+	cfg.Probes = []string{"https://shop.example.com"}
+	cfg.Gateway = config.Gateway{Domain: "mon.example.com", StatusDomain: "status.example.com"}
+	cfg.StatusPage = config.StatusPage{Enabled: true, Title: "Acme", Monitors: []config.Monitor{{Probe: "https://shop.example.com", Name: "Shop"}}}
+	cfg.Kubernetes.Ingress = config.Ingress{ClusterIssuer: "le"}
+	objs := render(t, cfg, stack.Extras{}, Options{})
+
+	in := objs["Ingress/gateway"]
+	if len(in.Spec.Rules) != 2 || in.Spec.Rules[0].Host != "mon.example.com" || in.Spec.Rules[1].Host != "status.example.com" {
+		t.Fatalf("ingress rules = %+v", in.Spec.Rules)
+	}
+	for _, r := range in.Spec.Rules {
+		if r.HTTP.Paths[0].Backend.Service.Name != "gateway" {
+			t.Errorf("host %s routes to %q, want gateway", r.Host, r.HTTP.Paths[0].Backend.Service.Name)
+		}
+	}
+	if len(in.Spec.TLS) != 1 || len(in.Spec.TLS[0].Hosts) != 2 {
+		t.Errorf("tls = %+v", in.Spec.TLS)
+	}
+	gw := objs["ConfigMap/gateway-config"].Data
+	if !strings.Contains(gw["Caddyfile"], "http://status.example.com") || strings.Contains(gw["Caddyfile"], "tls internal") {
+		t.Errorf("k8s Caddyfile:\n%s", gw["Caddyfile"])
+	}
+	if !strings.Contains(gw["config.json"], `"name": "Shop"`) || !strings.Contains(gw["index.html"], "<title>") {
+		t.Error("status page files missing from the gateway ConfigMap")
+	}
+	if !hasEnv(objs["StatefulSet/grafana"], "GF_SERVER_ROOT_URL", "https://mon.example.com/") {
+		t.Error("GF_SERVER_ROOT_URL not set from gateway.domain")
+	}
+}

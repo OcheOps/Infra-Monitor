@@ -12,6 +12,8 @@ volumes:
   loki-data:
   jaeger-data:
   fluentbit-data:
+  gateway-data:
+  gateway-config:
 
 services:
   prometheus:
@@ -49,6 +51,7 @@ services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?run infra-monitor init}
       - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3000/}
     volumes:
       - grafana-data:/var/lib/grafana
       - ./provisioning/datasources:/etc/grafana/provisioning/datasources:ro,z
@@ -135,3 +138,22 @@ services:
       - /var/lib/docker/:/var/lib/docker:ro
     ports:
       - "127.0.0.1:8080:8080"
+
+  # HTTPS gateway: Grafana at /, the public status page at /status/. Bound to
+  # localhost:8081 until `infra-monitor expose --domain` publishes 80/443.
+  gateway:
+    image: caddy:2.8.4-alpine
+    <<: *restart
+    networks: [monitor]
+    ports:
+      - "${GATEWAY_HTTP:-127.0.0.1:8081}:80"
+      - "${GATEWAY_HTTPS:-127.0.0.1:8443}:443"
+      - "${GATEWAY_HTTPS:-127.0.0.1:8443}:443/udp"
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - ./gateway/status:/srv/status:ro,z
+      - gateway-data:/data
+      - gateway-config:/config
+    depends_on:
+      - grafana
+      - prometheus

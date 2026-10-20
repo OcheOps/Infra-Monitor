@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -292,4 +293,88 @@ func SortedKeys(m map[string][]byte) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// ProbeInstance is the Prometheus instance label a probe's series carry:
+// the URL for HTTP checks, host:port for tcp:// checks.
+func ProbeInstance(probe string) string {
+	if u, err := url.Parse(probe); err == nil && u.Scheme == "tcp" {
+		return u.Host
+	}
+	return probe
+}
+
+// StatusQueries returns the PromQL the public status page may run, keyed by
+// endpoint name and URL-encoded. It is empty when the page shows nothing.
+func StatusQueries(cfg config.Config) map[string]string {
+	sp := cfg.StatusPage
+	if !sp.Enabled || len(sp.Monitors) == 0 {
+		return map[string]string{}
+	}
+	var res []string
+	for _, m := range sp.Monitors {
+		res = append(res, regexp.QuoteMeta(ProbeInstance(m.Probe)))
+	}
+	sel := `{job=~"blackbox|blackbox-tcp",instance=~` + strconv.Quote(strings.Join(res, "|")) + `}`
+	q := map[string]string{
+		"now":     "probe_success" + sel,
+		"latency": "probe_duration_seconds" + sel,
+		"day":     "avg_over_time(probe_success" + sel + "[1d])",
+		"uptime":  "avg_over_time(probe_success" + sel + "[30d])",
+		"history": "avg_over_time(probe_success" + sel + "[1d])[30d:1d]",
+	}
+	for k, v := range q {
+		q[k] = url.QueryEscape(v)
+	}
+	return q
+}
+
+// StatusPageJSON is the status page's config.json: its title and the
+// display name for each monitored instance. Nothing else is exposed.
+func StatusPageJSON(cfg config.Config) ([]byte, error) {
+	type monitor struct {
+		Name     string `json:"name"`
+		Instance string `json:"instance"`
+	}
+	page := struct {
+		Title    string    `json:"title"`
+		Monitors []monitor `json:"monitors"`
+	}{Title: cfg.StatusPage.Title, Monitors: []monitor{}}
+	if cfg.StatusPage.Enabled {
+		for _, m := range cfg.StatusPage.Monitors {
+			page.Monitors = append(page.Monitors, monitor{Name: m.Name, Instance: ProbeInstance(m.Probe)})
+		}
+	}
+	return json.MarshalIndent(page, "", "  ")
+}
+
+// GatewayConfig renders the Caddyfile. On Compose, Caddy terminates TLS for
+// the public domain itself; on Kubernetes the Ingress does, so Caddy serves
+// plain HTTP inside the cluster.
+func GatewayConfig(b Backend, cfg config.Config) ([]byte, error) {
+	g := cfg.Gateway
+	public := b == Compose && g.Domain != ""
+	data := struct {
+		Site, StatusSite, Email string
+		HTTPS, InternalTLS      bool
+		StatusPage              bool
+		Queries                 map[string]string
+	}{
+		Site:       ":80",
+		StatusPage: cfg.StatusPage.Enabled,
+		Queries:    StatusQueries(cfg),
+	}
+	if public {
+		data.Site = g.Domain
+		data.HTTPS = true
+		data.InternalTLS = g.TLS == "internal"
+		data.Email = g.Email
+	}
+	if g.StatusDomain != "" {
+		data.StatusSite = g.StatusDomain
+		if b == Kubernetes {
+			data.StatusSite = "http://" + g.StatusDomain
+		}
+	}
+	return render("gateway", data, [2]string{}, "shared/gateway/Caddyfile.tmpl")
 }

@@ -28,6 +28,11 @@ Setup:
                                alert channels: telegram, slack, email, webhook
   config  show|path            print the config (secrets hidden) or its location
 
+Public access:
+  expose [--domain D] [off]    serve Grafana over HTTPS on your domain (Let's Encrypt)
+  statuspage show|enable|disable|add|remove
+                               public status page for selected checks
+
 Run on this host (Docker Compose):
   compose up|down|restart|status|logs [SERVICE]
   compose sync                 write the Compose project without starting it
@@ -108,6 +113,10 @@ func (a *app) run(args []string) error {
 	switch cmd {
 	case "init", "setup":
 		return a.cmdInit(rest)
+	case "expose":
+		return a.cmdExpose(rest)
+	case "statuspage", "status-page":
+		return a.cmdStatusPage(rest)
 	case "probes", "probe", "urls":
 		return a.cmdProbes(rest)
 	case "targets", "target":
