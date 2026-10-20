@@ -4,13 +4,37 @@
 [![Release](https://img.shields.io/github/v/release/OcheOps/Infra-Monitor?sort=semver)](https://github.com/OcheOps/Infra-Monitor/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Metrics, logs, traces, dashboards and alerts for your servers or Kubernetes
-cluster, set up by answering a few questions.**
+**Self-hosted monitoring for your servers, apps and websites, set up by
+answering a few questions.**
 
-Infra Monitor packages a standard open-source observability stack, ready
-configured, as one interactive CLI. It runs the same stack on a Linux host with
-Docker Compose or on any Kubernetes cluster. Tell it which websites to check and
-where to send alerts; it writes every config file for you.
+Infra Monitor is one CLI that installs and runs a complete open-source
+observability stack for you: Prometheus, Grafana, Loki, Alertmanager and
+Jaeger. You get metrics, logs, traces, dashboards and alerts without writing a
+single config file. It runs on a Linux host with Docker Compose or on any
+Kubernetes cluster, and your data never leaves your machines.
+
+**What it does:**
+- **Checks your websites and services** every 15 seconds and alerts you on
+  Telegram, Slack, email or a webhook when one fails, slows down, or its TLS
+  certificate is about to expire.
+- **Watches your servers and containers:** CPU, memory, disk, network, and logs.
+  Monitor more machines by adding a small agent with one command
+  ([details](#monitoring-more-servers)).
+- **Finds your databases and apps** (PostgreSQL, MySQL, Redis, MongoDB, Nginx,
+  RabbitMQ) and monitors them with ready-made dashboards and alerts
+  ([details](#databases-caches-and-web-servers)).
+- **Serves Grafana over HTTPS** on your domain, and publishes a **public status
+  page** ([details](#public-access-and-status-page)).
+- **Keeps you informed:** `status` shows everything at a glance in your
+  terminal, a daily digest summarizes the last 24 hours, and, if you opt in,
+  `explain` asks Claude what an alert means and what to check next
+  ([details](#status-daily-digest-and-ai-explanations)).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OcheOps/Infra-Monitor/main/install.sh | sh
+infra-monitor          # guided setup, then start the stack
+infra-monitor status   # what's up and what's down
+```
 
 ```text
 $ infra-monitor
@@ -29,6 +53,10 @@ Start the stack now?
   2) Kubernetes (prod-cluster)
   3) Not now
 ```
+
+**Who it's for:** small teams, side projects and homelabs that want
+production-grade monitoring without spending a week wiring up Prometheus,
+or paying for a hosted service.
 
 ## Contents
 
@@ -66,6 +94,9 @@ Start the stack now?
 | Traces            | Jaeger v2                                   | receives OpenTelemetry (OTLP) traces from your apps |
 | Dashboards        | Grafana                                     | Node Exporter and cAdvisor dashboards; Prometheus, Loki and Jaeger datasources |
 | Notifications     | Alertmanager                                | Telegram, Slack, email and webhooks |
+| Databases and apps | Prometheus exporters, added by `integrations` | PostgreSQL, MySQL, Redis, MongoDB, Nginx, RabbitMQ |
+| More servers      | Agents (Prometheus agent mode, Fluent Bit)  | send other hosts' metrics and logs to one server over HTTPS |
+| HTTPS and status page | Caddy                                   | Grafana on your domain with Let's Encrypt, plus a public status page |
 
 Every image version is pinned, so an install today gives you the same stack as
 an install next month.
@@ -79,6 +110,7 @@ flowchart LR
     ctr[Containers / pods]
     app[Your apps]
     urls[Your websites and services]
+    db[Databases and apps]
   end
 
   host --> ne[Node Exporter]
@@ -86,13 +118,19 @@ flowchart LR
   ctr -- log files --> fb[Fluent Bit]
   app -- OTLP traces --> jaeger[Jaeger]
   bb[Blackbox exporter] -- HTTP / TCP checks --> urls
+  db --> exp[Exporters]
 
-  ne & cad & bb --> prom[Prometheus]
+  ne & cad & bb & exp --> prom[Prometheus]
   fb --> loki[Loki]
   prom -- firing alerts --> am[Alertmanager]
   am --> ch[Telegram · Slack · email · webhook]
 
   prom & loki & jaeger --> grafana[Grafana]
+
+  agents[Agents on other servers] -- HTTPS --> gw[Gateway: Caddy]
+  gw --> prom & loki
+  gw -- HTTPS --> grafana
+  gw -- public --> status[Status page]
 ```
 
 ## Install
@@ -106,7 +144,7 @@ verifies its checksum and installs `infra-monitor`:
 - **Where it goes:** `/usr/local/bin`, using sudo if needed. If sudo isn't
   available, it falls back to `~/.local/bin`.
 - **Upgrading:** run the same command again.
-- **Pinning a version:** prefix it with `INFRA_MONITOR_VERSION=v0.1.0`.
+- **Pinning a version:** prefix it with `INFRA_MONITOR_VERSION=v0.2.0`.
 - **Choosing the folder:** prefix it with `INFRA_MONITOR_INSTALL_DIR=~/bin`.
 
 Prefer not to pipe a script into your shell? Download it first and read it:
