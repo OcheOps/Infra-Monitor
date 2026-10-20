@@ -53,11 +53,37 @@ jobs:
           docker compose --project-directory "$C" -f "$C/docker-compose.yml" --env-file "$C/.env" config -q
           bin/infra-monitor k8s render > k8s.yaml
           kubeconform -strict -summary -kubernetes-version 1.30.0 k8s.yaml
+      - name: Shellcheck
+        run: shellcheck install.sh packaging/*.sh .github/scripts/*.sh
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --snapshot --clean --skip=before
+          args: release --snapshot --clean
+      - name: Install the .deb
+        run: |
+          sudo dpkg -i dist/*_amd64.deb
+          infra-monitor version
+          test -f /usr/share/bash-completion/completions/infra-monitor
+          sudo dpkg -r infra-monitor
+      - name: install.sh against the snapshot
+        run: |
+          archive=$(ls dist/infra-monitor_*_linux_amd64.tar.gz)
+          version="v$(basename "$archive" | sed 's/^infra-monitor_\(.*\)_linux_amd64.tar.gz$/\1/')"
+          python3 .github/scripts/fake-release-server.py dist "$version" 8765 >/dev/null 2>&1 &
+          server=$!
+          for _ in $(seq 20); do curl -fsSI -o /dev/null http://127.0.0.1:8765/latest && break; sleep 0.5; done
+          kill -0 "$server"   # fail if our server didn't start (e.g. port taken)
+          export INFRA_MONITOR_BASE_URL=http://127.0.0.1:8765
+          INFRA_MONITOR_INSTALL_DIR="$RUNNER_TEMP/latest" sh install.sh
+          "$RUNNER_TEMP/latest/infra-monitor" version
+          INFRA_MONITOR_INSTALL_DIR="$RUNNER_TEMP/pinned" INFRA_MONITOR_VERSION="$version" sh install.sh
+          sed -i 's/^[0-9a-f]\{8\}/00000000/' dist/checksums.txt
+          if INFRA_MONITOR_INSTALL_DIR="$RUNNER_TEMP/bad" sh install.sh; then
+            echo "::error::install.sh accepted a bad checksum"; exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/bad/infra-monitor"
+          kill "$server"
 
   compose-smoke:
     needs: test
@@ -83,10 +109,10 @@ jobs:
       - name: Grafana, Loki and Jaeger work
         run: |
           curl -fsS http://localhost:3000/api/health
-          for i in $(seq 30); do curl -fsS http://localhost:3100/ready && break; sleep 5; done
+          for _ in $(seq 30); do curl -fsS http://localhost:3100/ready && break; sleep 5; done
           trace=$(openssl rand -hex 16); now=$(date +%s%N)
           curl -fsS -H 'Content-Type: application/json' http://localhost:4318/v1/traces -d "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"ci\"}}]},\"scopeSpans\":[{\"spans\":[{\"traceId\":\"$trace\",\"spanId\":\"0123456789abcdef\",\"name\":\"ci\",\"kind\":1,\"startTimeUnixNano\":\"$now\",\"endTimeUnixNano\":\"$((now+1000000))\"}]}]}]}"
-          for i in $(seq 20); do curl -fsS "http://localhost:16686/api/traces/$trace" | jq -e '.data | length == 1' && exit 0; sleep 3; done
+          for _ in $(seq 20); do curl -fsS "http://localhost:16686/api/traces/$trace" | jq -e '.data | length == 1' && exit 0; sleep 3; done
           echo "trace not found in Jaeger"; exit 1
       - name: notify test reaches Alertmanager
         run: bin/infra-monitor notify test
@@ -126,7 +152,7 @@ jobs:
           $q "$exec" 'count(prometheus_rule_group_rules{rule_group=~".*kubernetes.*"})'
       - name: Logs arrive in Loki
         run: |
-          for i in $(seq 30); do
+          for _ in $(seq 30); do
             out=$(kubectl -n infra-monitor exec prometheus-0 -- wget -qO- 'http://loki:3100/loki/api/v1/labels' || true)
             echo "$out" | grep -q kubernetes_namespace_name && { echo "$out"; exit 0; }
             sleep 5

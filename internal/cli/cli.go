@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/OcheOps/Infra-Monitor/internal/config"
+	"github.com/OcheOps/Infra-Monitor/internal/doctor"
 	"github.com/OcheOps/Infra-Monitor/internal/prompt"
 	"github.com/OcheOps/Infra-Monitor/internal/stack"
 )
@@ -38,6 +39,8 @@ Run on Kubernetes:
   k8s delete [--purge]         remove (--purge also deletes all data)
 
 Other:
+  doctor [compose|k8s]         check this machine's prerequisites and how to fix them
+  completion bash|zsh|fish     print a shell completion script
   version
 
 Global flags:
@@ -56,6 +59,8 @@ type app struct {
 	stderr      io.Writer
 	p           *prompt.Prompter
 	interactive bool
+	// doctor runs prerequisite checks; nil skips them (tests).
+	doctor *doctor.Doctor
 }
 
 // Run executes the CLI and returns the process exit code.
@@ -66,6 +71,7 @@ func Run(args []string, version string) int {
 		stderr:      os.Stderr,
 		p:           prompt.New(os.Stdin, os.Stdout),
 		interactive: prompt.IsTerminal(os.Stdin) && prompt.IsTerminal(os.Stdout),
+		doctor:      doctor.New(),
 	}
 	if err := a.run(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -114,6 +120,10 @@ func (a *app) run(args []string) error {
 		return a.cmdCompose(rest)
 	case "k8s", "kubernetes":
 		return a.cmdK8s(rest)
+	case "doctor":
+		return a.cmdDoctor(rest)
+	case "completion":
+		return a.cmdCompletion(rest)
 	case "version", "--version":
 		fmt.Fprintln(a.stdout, a.version)
 		return nil

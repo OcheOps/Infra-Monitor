@@ -7,6 +7,7 @@ before:
   hooks:
     - go mod tidy
     - go test ./...
+    - ./packaging/completions.sh
 
 builds:
   - id: infra-monitor
@@ -23,7 +24,7 @@ archives:
   - id: default
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    files: [README.md, LICENSE]
+    files: [README.md, LICENSE, completions/*]
 
 nfpms:
   - id: packages
@@ -37,6 +38,15 @@ nfpms:
     formats: [deb, rpm]
     bindir: /usr/bin
     recommends: [docker-ce, kubectl]
+    contents:
+      - src: completions/infra-monitor.bash
+        dst: /usr/share/bash-completion/completions/infra-monitor
+      - src: completions/infra-monitor.zsh
+        dst: /usr/share/zsh/site-functions/_infra-monitor
+      - src: completions/infra-monitor.fish
+        dst: /usr/share/fish/vendor_completions.d/infra-monitor.fish
+    scripts:
+      postinstall: packaging/postinstall.sh
 
 checksum:
   name_template: checksums.txt

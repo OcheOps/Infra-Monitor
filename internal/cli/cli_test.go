@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"net/http"
@@ -10,10 +12,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OcheOps/Infra-Monitor/internal/config"
+	"github.com/OcheOps/Infra-Monitor/internal/doctor"
 	"github.com/OcheOps/Infra-Monitor/internal/prompt"
 )
 
@@ -325,3 +330,116 @@ func TestMenuAddProbeThenQuit(t *testing.T) {
 // fake returns a placeholder credential for tests. It is built at runtime so
 // secret scanners don't mistake test fixtures for real credentials.
 func fake(s string) string { return "fake-" + s }
+
+func TestCompletion(t *testing.T) {
+	a, out := newApp(t, "")
+	a.runT(t, "completion", "bash")
+	bash := out.String()
+	for _, w := range []string{"complete -F _infra_monitor infra-monitor", `"k8s port-forward") opts="grafana`, "targets list"} {
+		if !strings.Contains(bash, w) {
+			t.Errorf("bash completion missing %q", w)
+		}
+	}
+	for path := range completionTree {
+		if !strings.Contains(bash, strconv.Quote(path)+")") {
+			t.Errorf("bash completion has no case for %q", path)
+		}
+	}
+
+	out.Reset()
+	a.runT(t, "completion", "zsh")
+	if !strings.HasPrefix(out.String(), "#compdef infra-monitor") || !strings.Contains(out.String(), "bashcompinit") {
+		t.Errorf("zsh completion = %q", out.String()[:60])
+	}
+
+	out.Reset()
+	a.runT(t, "completion", "fish")
+	fish := out.String()
+	if !strings.Contains(fish, "-n '__fish_use_subcommand' -a 'init probes") ||
+		!strings.Contains(fish, "__fish_seen_subcommand_from notify; and __fish_seen_subcommand_from add") {
+		t.Errorf("fish completion:\n%s", fish)
+	}
+
+	if err := a.run([]string{"completion", "powershell"}); err == nil {
+		t.Error("expected an error for an unknown shell")
+	}
+}
+
+// fakeDoctor returns a Doctor for a host with the given tools installed and
+// healthy, and nothing else.
+func fakeDoctor(installed ...string) *doctor.Doctor {
+	have := map[string]bool{}
+	for _, n := range installed {
+		have[n] = true
+	}
+	return &doctor.Doctor{
+		Run: func(_ context.Context, name string, args ...string) (string, error) {
+			if !have[name] {
+				return "", errors.New("not found")
+			}
+			switch cmd := strings.Join(args, " "); {
+			case strings.HasPrefix(cmd, "compose version"):
+				return "2.29.1", nil
+			case strings.HasPrefix(cmd, "info"):
+				return "27.1.1", nil
+			case strings.HasPrefix(cmd, "config current-context"):
+				return "kind-test", nil
+			case strings.HasPrefix(cmd, "version"):
+				return `{"serverVersion":{}}`, nil
+			case strings.HasPrefix(cmd, "auth can-i"):
+				return "yes", nil
+			case strings.HasPrefix(cmd, "get storageclass"):
+				return "standard=true", nil
+			}
+			return "", errors.New("unexpected: " + name + " " + strings.Join(args, " "))
+		},
+		LookPath: func(n string) (string, error) {
+			if have[n] {
+				return "/usr/bin/" + n, nil
+			}
+			return "", errors.New("not found")
+		},
+		PortFree: func(int) bool { return true },
+		GOOS:     "linux",
+		Timeout:  time.Second,
+	}
+}
+
+func TestDoctorCommand(t *testing.T) {
+	a, out := newApp(t, "")
+	a.doctor = fakeDoctor("kubectl")
+	a.runT(t, "doctor")
+	s := out.String()
+	for _, want := range []string{"not set up yet", "✗ Docker installed", "https://docs.docker.com/engine/install/", "✓ Cluster reachable", "Ready: `infra-monitor k8s apply`"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("doctor output missing %q:\n%s", want, s)
+		}
+	}
+
+	out.Reset()
+	if err := a.run([]string{"--dir", a.dir, "doctor", "compose"}); err == nil {
+		t.Error("doctor compose should fail without Docker")
+	}
+	a.doctor = fakeDoctor("docker", "kubectl")
+	out.Reset()
+	a.runT(t, "init")
+	out.Reset()
+	a.runT(t, "doctor")
+	if !strings.Contains(out.String(), "✓ "+config.Path(a.dir)) || !strings.Contains(out.String(), "compose up` or `infra-monitor k8s apply") {
+		t.Errorf("doctor output:\n%s", out.String())
+	}
+}
+
+func TestPreflightBlocksComposeUp(t *testing.T) {
+	a, _ := newApp(t, "")
+	a.runT(t, "init")
+	a.doctor = fakeDoctor() // nothing installed
+	err := a.run([]string{"--dir", a.dir, "compose", "up"})
+	if err == nil || !strings.Contains(err.Error(), "Docker installed") || !strings.Contains(err.Error(), "fix:") {
+		t.Errorf("compose up error = %v", err)
+	}
+	err = a.run([]string{"--dir", a.dir, "k8s", "apply"})
+	if err == nil || !strings.Contains(err.Error(), "kubectl installed") {
+		t.Errorf("k8s apply error = %v", err)
+	}
+}
