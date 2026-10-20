@@ -169,7 +169,7 @@ jobs:
           .github/scripts/wait-for-query.sh "curl -fsS" 'up{agent="ci-agent",job="node"}'
           .github/scripts/wait-for-query.sh "curl -fsS" 'count(node_cpu_seconds_total{instance="ci-agent"})'
           for _ in $(seq 30); do
-            curl -fsS http://localhost:3100/loki/api/v1/label/agent/values | jq -e 'index("ci-agent") != null' && exit 0
+            curl -fsS http://localhost:3100/loki/api/v1/label/agent/values | jq -e '.data | index("ci-agent") != null' && exit 0
             sleep 5
           done
           echo "no logs from ci-agent in Loki"; exit 1
