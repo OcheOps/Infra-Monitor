@@ -74,7 +74,7 @@ jobs:
         run: docker compose -f deploy/integrations/catalog.yml --profile catalog config --images | xargs -n1 docker manifest inspect >/dev/null
       - name: Shellcheck
         run: shellcheck install.sh packaging/*.sh .github/scripts/*.sh
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
