@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,8 @@ import (
 
 	"github.com/OcheOps/Infra-Monitor/internal/config"
 	"github.com/OcheOps/Infra-Monitor/internal/doctor"
+	"github.com/OcheOps/Infra-Monitor/internal/promapi"
+	"github.com/OcheOps/Infra-Monitor/internal/promapi/promapitest"
 	"github.com/OcheOps/Infra-Monitor/internal/prompt"
 )
 
@@ -362,7 +365,7 @@ func TestCompletion(t *testing.T) {
 	out.Reset()
 	a.runT(t, "completion", "fish")
 	fish := out.String()
-	if !strings.Contains(fish, "-n '__fish_use_subcommand' -a 'init probes") ||
+	if !strings.Contains(fish, "-n '__fish_use_subcommand' -a 'init status digest explain ai probes") ||
 		!strings.Contains(fish, "__fish_seen_subcommand_from notify; and __fish_seen_subcommand_from add") {
 		t.Errorf("fish completion:\n%s", fish)
 	}
@@ -800,5 +803,95 @@ func TestIntegrationsDetectInteractive(t *testing.T) {
 	want := []config.Integration{{Type: "postgres", Name: "shop-db-1", Address: "shop-db-1:5432", Network: "shop_default", Username: "postgres", Password: fake("pg")}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("integrations = %+v", got)
+	}
+}
+
+type memCrontab struct{ s string }
+
+func (m *memCrontab) Read() (string, error) { return m.s, nil }
+func (m *memCrontab) Write(s string) error  { m.s = s; return nil }
+
+func TestStatusDigestExplain(t *testing.T) {
+	f := &promapitest.Fake{
+		Vectors: map[string][]promapi.Sample{"probe_success": {promapitest.S(0, "instance", "https://shop.example.com")}},
+		Alerts: []promapi.Alert{{Name: "ProbeFailed", State: "firing", ActiveAt: time.Now(),
+			Labels: map[string]string{"alertname": "ProbeFailed", "instance": "https://shop.example.com"}}},
+		Rules: []promapi.Rule{{Name: "ProbeFailed", Query: "probe_success == 0"}},
+	}
+	e := f.Start(t)
+	a, out := newApp(t, "")
+	a.endpoints = &e
+	a.runT(t, "init", "--telegram-token", "1:"+fake("tg"), "--telegram-chat-id", "5")
+
+	a.runT(t, "status")
+	if !strings.Contains(out.String(), "✗ https://shop.example.com") || !strings.Contains(out.String(), "Firing ProbeFailed") || !strings.Contains(out.String(), "infra-monitor explain") {
+		t.Errorf("status:\n%s", out.String())
+	}
+
+	out.Reset()
+	a.runT(t, "digest", "show")
+	if !strings.Contains(out.String(), "daily summary") {
+		t.Errorf("digest show:\n%s", out.String())
+	}
+	cron := &memCrontab{}
+	a.crontab = cron
+	a.runT(t, "digest", "enable", "--at", "07:30")
+	if !strings.Contains(cron.s, "30 7 * * * ") || !strings.Contains(cron.s, "digest send") || !strings.Contains(cron.s, a.dir) {
+		t.Errorf("crontab = %q", cron.s)
+	}
+	if err := a.run([]string{"--dir", a.dir, "digest", "enable", "--at", "25:00"}); err == nil {
+		t.Error("accepted --at 25:00")
+	}
+	a.runT(t, "digest", "disable")
+	if cron.s != "" {
+		t.Errorf("crontab after disable = %q", cron.s)
+	}
+
+	// explain is opt-in.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	if err := a.run([]string{"--dir", a.dir, "explain", "ProbeFailed"}); err == nil || !strings.Contains(err.Error(), "ai enable") {
+		t.Errorf("explain while off: %v", err)
+	}
+	out.Reset()
+	a.runT(t, "explain", "ProbeFailed", "--dry-run")
+	if !strings.Contains(out.String(), "--- user ---\nAlert: ProbeFailed") || !strings.Contains(out.String(), "Model: claude-opus-5-5") {
+		t.Errorf("dry run:\n%s", out.String())
+	}
+
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-"+fake("key"))
+	a.runT(t, "ai", "enable")
+	if cfg := a.cfgT(t); cfg.AI == nil || cfg.AI.APIKey != "" {
+		t.Errorf("ai enable with the env var stored %+v", cfg.AI)
+	}
+	claude := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Api-Key") != "sk-ant-"+fake("key") {
+			http.Error(w, `{"type":"error","error":{"type":"authentication_error","message":"bad key"}}`, 401)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, ev := range []string{
+			`{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The shop is down."}}`,
+			`{"type":"content_block_stop","index":0}`,
+			`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}`,
+			`{"type":"message_stop"}`,
+		} {
+			var m map[string]any
+			json.Unmarshal([]byte(ev), &m)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", m["type"], ev)
+		}
+	}))
+	defer claude.Close()
+	a.aiBaseURL = claude.URL
+	out.Reset()
+	a.runT(t, "explain", "ProbeFailed")
+	if !strings.Contains(out.String(), "The shop is down.") || !strings.Contains(out.String(), "Asking Claude (claude-opus-5-5)") {
+		t.Errorf("explain:\n%s", out.String())
+	}
+
+	a.runT(t, "ai", "disable")
+	if a.cfgT(t).AI != nil {
+		t.Error("ai disable kept the settings")
 	}
 }

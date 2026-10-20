@@ -37,6 +37,7 @@ Start the stack now?
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Everyday commands](#everyday-commands)
+- [Status, daily digest and AI explanations](#status-daily-digest-and-ai-explanations)
 - [Checking websites and services](#checking-websites-and-services)
 - [Databases, caches and web servers](#databases-caches-and-web-servers)
 - [Public access and status page](#public-access-and-status-page)
@@ -122,7 +123,7 @@ From the [Releases page](https://github.com/OcheOps/Infra-Monitor/releases):
 | Fedora / RHEL / Rocky | `sudo dnf install ./infra-monitor-<version>-1.x86_64.rpm` |
 | Any Linux or macOS | unpack `infra-monitor_<version>_<os>_<arch>.tar.gz` and put `infra-monitor` on your `PATH` |
 | With Go | `go install github.com/OcheOps/Infra-Monitor/cmd/infra-monitor@latest` |
-| From source | `make install` (installs to `/usr/local/bin`; needs Go 1.22+) |
+| From source | `make install` (installs to `/usr/local/bin`; needs Go 1.24+) |
 
 The `.deb` and `.rpm` packages also install tab completion for bash, zsh and
 fish. Builds are published for Linux and macOS on amd64 and arm64, with a
@@ -201,6 +202,9 @@ infra-monitor compose up        # or: infra-monitor k8s apply
 | Task | Command |
 |------|---------|
 | Interactive menu | `infra-monitor` |
+| What's up and what's down | `infra-monitor status` |
+| Get a daily summary | `infra-monitor digest enable --at 08:00` |
+| Ask Claude what an alert means | `infra-monitor explain HostOutOfMemory` (opt-in) |
 | Run the setup wizard again | `infra-monitor init` |
 | Check a new website | `infra-monitor probes add https://example.com` |
 | Stop checking it | `infra-monitor probes remove https://example.com` (or no argument to pick from a list) |
@@ -220,6 +224,76 @@ infra-monitor compose up        # or: infra-monitor k8s apply
 Commands that change settings offer to apply the change right away when run in
 a terminal. In scripts they print what to run instead. Run any command with
 `--help` to see its flags.
+
+## Status, daily digest and AI explanations
+
+### `status`
+
+`infra-monitor status` prints everything at a glance: each check with its
+latency and uptime today, each host's CPU, memory and fullest disk (agents
+included), your integrations, and the alerts that are pending or firing.
+
+```
+1 problem(s) need attention.
+
+Checks (2)
+  ✓ https://shop.example.com                         184ms   100.00% up today
+  ✗ tcp://db.internal:5432                               –    97.92% up today
+
+Hosts (2)                                 CPU   Mem  Disk
+  ✓ node-exporter                           12%   41%   63%
+  ✓ web-2                                    3%   22%   38%
+
+Alerts
+  Firing ProbeFailed for 30m: Check of tcp://db.internal:5432 is failing
+```
+
+### Daily digest
+
+The digest is a short summary of the last 24 hours, sent to your
+[notification channels](#channels). It includes:
+- overall uptime, and which checks dipped;
+- every alert that fired, and roughly for how long;
+- hosts that went quiet or are filling up;
+- services that are down.
+
+```bash
+infra-monitor digest show                # preview it
+infra-monitor digest send                # send one now
+infra-monitor digest enable --at 08:00   # every day at 08:00 (adds a line to your crontab)
+infra-monitor digest disable
+```
+
+Webhooks receive the digest as
+`{"type": "infra-monitor.digest", "subject": "...", "text": "..."}`.
+
+### `explain`: ask Claude about an alert
+
+`infra-monitor explain` sends an alert to Claude, Anthropic's AI model, and
+prints what it means, how urgent it is, the likely causes, and what to check
+next. It sends the alert's labels, its rule, the last 3 hours of the rule's
+query, and error-looking log lines from the last 30 minutes, plus the `status`
+overview.
+
+It's off until you turn it on, and it uses your own
+[Anthropic API key](https://console.anthropic.com/settings/keys):
+
+```bash
+infra-monitor ai enable            # asks for the key; or set ANTHROPIC_API_KEY
+infra-monitor explain              # pick from the active alerts
+infra-monitor explain HostOutOfMemory --instance web-2
+infra-monitor explain ProbeFailed --dry-run   # show what would be sent; sends nothing
+infra-monitor ai disable           # turn it off and forget the key
+```
+
+- **Privacy:** values that look like passwords, tokens or credentials in URLs
+  are masked before anything is sent. Use `--dry-run` to see exactly what
+  leaves the machine.
+- **Model:** the default is `claude-opus-5-5`. Set `ai.model` in
+  `config.yaml` to use another.
+- **On Kubernetes:** `status`, `digest` and `explain` read Prometheus and Loki
+  on `localhost`. Run `infra-monitor k8s port-forward prometheus` (and `loki`)
+  first, or pass `--prometheus URL` and `--loki URL`.
 
 ## Checking websites and services
 

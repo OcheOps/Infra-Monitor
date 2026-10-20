@@ -11,7 +11,9 @@ import (
 	"strings"
 
 	"github.com/OcheOps/Infra-Monitor/internal/config"
+	"github.com/OcheOps/Infra-Monitor/internal/digest"
 	"github.com/OcheOps/Infra-Monitor/internal/doctor"
+	"github.com/OcheOps/Infra-Monitor/internal/promapi"
 	"github.com/OcheOps/Infra-Monitor/internal/prompt"
 	"github.com/OcheOps/Infra-Monitor/internal/stack"
 )
@@ -27,6 +29,13 @@ Setup:
   notify  list|setup|add|remove|test
                                alert channels: telegram, slack, email, webhook
   config  show|path            print the config (secrets hidden) or its location
+
+What's going on:
+  status                       checks, hosts, services and alerts at a glance
+  digest show|send|enable|disable
+                               daily summary to your notification channels
+  explain [ALERT]              ask Claude what an alert means (opt-in: ai enable)
+  ai enable|disable|status     turn AI explanations on or off
 
 Apps and databases:
   integrations detect          find PostgreSQL, MySQL, Redis, MongoDB, Nginx, RabbitMQ here
@@ -79,6 +88,11 @@ type app struct {
 	doctor *doctor.Doctor
 	// gatewayCA overrides reading the gateway's CA certificate (tests).
 	gatewayCA func() ([]byte, error)
+	// Test overrides: the stack's API endpoints, the crontab and the
+	// Anthropic API base URL.
+	endpoints *promapi.Endpoints
+	crontab   digest.Crontab
+	aiBaseURL string
 }
 
 // Run executes the CLI and returns the process exit code.
@@ -132,6 +146,14 @@ func (a *app) run(args []string) error {
 	switch cmd {
 	case "init", "setup":
 		return a.cmdInit(rest)
+	case "status":
+		return a.cmdStatus(rest)
+	case "digest":
+		return a.cmdDigest(rest)
+	case "explain":
+		return a.cmdExplain(rest)
+	case "ai":
+		return a.cmdAI(rest)
 	case "integrations", "integration":
 		return a.cmdIntegrations(rest)
 	case "agent", "agents":
@@ -172,7 +194,7 @@ func (a *app) run(args []string) error {
 var serverOnly = map[string]bool{
 	"init": true, "setup": true, "probes": true, "probe": true, "urls": true, "targets": true, "target": true,
 	"notify": true, "notifications": true, "expose": true, "statuspage": true, "status-page": true,
-	"k8s": true, "kubernetes": true,
+	"k8s": true, "kubernetes": true, "status": true, "digest": true, "explain": true, "ai": true,
 }
 
 func defaultDir() string {
