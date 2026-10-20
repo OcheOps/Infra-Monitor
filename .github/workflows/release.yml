@@ -41,7 +41,7 @@ jobs:
           fi
           git tag "$VERSION"
           git push origin "refs/tags/$VERSION"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - uses: goreleaser/goreleaser-action@v6
