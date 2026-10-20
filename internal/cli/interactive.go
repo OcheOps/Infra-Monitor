@@ -577,14 +577,16 @@ func (a *app) menuAgent() error {
 }
 
 func (a *app) menuStatus() error {
-	i, err := a.p.Select("Status of:", []string{"Docker Compose on this host", "Kubernetes", "Back"}, 0)
+	i, err := a.p.Select("Status of:", []string{"Checks, hosts and alerts", "Docker Compose containers on this host", "Kubernetes pods", "Back"}, 0)
 	if err != nil {
 		return err
 	}
 	switch i {
 	case 0:
-		return a.cmdCompose([]string{"status"})
+		return a.cmdStatus(nil)
 	case 1:
+		return a.cmdCompose([]string{"status"})
+	case 2:
 		return a.cmdK8s([]string{"status"})
 	}
 	return nil

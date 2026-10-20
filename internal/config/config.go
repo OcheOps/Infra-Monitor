@@ -43,7 +43,21 @@ type Config struct {
 	// Agent, when set, makes this host an agent of another server instead
 	// of running the full stack.
 	Agent *AgentConfig `yaml:"agent,omitempty"`
+	// AI turns on `infra-monitor explain`, which sends an alert and its
+	// context to Claude. Off unless set.
+	AI *AI `yaml:"ai,omitempty"`
 }
+
+// AI holds the opt-in Claude settings.
+type AI struct {
+	// APIKey is an Anthropic API key; ANTHROPIC_API_KEY overrides it.
+	APIKey string `yaml:"anthropic_api_key,omitempty"`
+	// Model defaults to DefaultAIModel.
+	Model string `yaml:"model,omitempty"`
+}
+
+// DefaultAIModel is the Claude model `explain` uses unless ai.model is set.
+const DefaultAIModel = "claude-opus-5-5"
 
 // Integration is one monitored service.
 type Integration struct {
@@ -400,6 +414,9 @@ func (c Config) Validate() error {
 	}
 
 	errs = append(errs, c.validateIntegrations()...)
+	if c.AI != nil && c.AI.Model != "" && !aiModelRe.MatchString(c.AI.Model) {
+		errs = append(errs, fmt.Errorf("ai.model %q doesn't look like a Claude model id (e.g. %s)", c.AI.Model, DefaultAIModel))
+	}
 
 	agentNames := map[string]bool{}
 	for _, a := range c.Agents {
@@ -489,8 +506,9 @@ func (c Config) Validate() error {
 }
 
 var (
-	tokenRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{20,128}$`)
-	sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	tokenRe   = regexp.MustCompile(`^[A-Za-z0-9_-]{20,128}$`)
+	sha256Re  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	aiModelRe = regexp.MustCompile(`^claude-[a-z0-9.-]+$`)
 )
 
 var (

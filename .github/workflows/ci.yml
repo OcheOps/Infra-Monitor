@@ -136,6 +136,20 @@ jobs:
           echo "trace not found in Jaeger"; exit 1
       - name: notify test reaches Alertmanager
         run: bin/infra-monitor notify test
+      - name: status, digest and explain read the running stack
+        run: |
+          bin/infra-monitor status | tee status.txt
+          grep -q '✓ http://grafana:3000/api/health' status.txt
+          grep -q '✓ node-exporter' status.txt
+          bin/infra-monitor digest show | tee digest.txt
+          grep -q 'daily summary' digest.txt
+          grep -q 'Checks: 1, average uptime' digest.txt
+          # explain is opt-in; --dry-run shows what it would send.
+          if bin/infra-monitor explain InstanceDown 2>err.txt; then echo "::error::explain ran without ai enable"; exit 1; fi
+          grep -q 'ai enable' err.txt
+          bin/infra-monitor explain InstanceDown --dry-run | tee explain.txt
+          grep -q 'Rule expression:' explain.txt
+          grep -q 'up == 0' explain.txt
       - name: Integrations find and monitor PostgreSQL and Redis
         run: |
           pw=$(openssl rand -hex 12)

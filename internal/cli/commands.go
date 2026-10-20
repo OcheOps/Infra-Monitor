@@ -531,6 +531,11 @@ func redact(c config.Config) config.Config {
 		}
 	}
 	c.Integrations = ints
+	if c.AI != nil && c.AI.APIKey != "" {
+		ai := *c.AI
+		ai.APIKey = hidden
+		c.AI = &ai
+	}
 	if c.Agent != nil {
 		ag := *c.Agent
 		ag.Token = hidden
