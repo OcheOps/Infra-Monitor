@@ -34,6 +34,9 @@ type Config struct {
 	Retention     Retention     `yaml:"retention"`
 	Gateway       Gateway       `yaml:"gateway,omitempty"`
 	StatusPage    StatusPage    `yaml:"status_page,omitempty"`
+	// Integrations are services on this host (databases, caches, web
+	// servers, queues) monitored through exporters. Agents have them too.
+	Integrations []Integration `yaml:"integrations,omitempty"`
 	// Agents are other hosts allowed to send data to this server.
 	Agents     []Agent    `yaml:"agents,omitempty"`
 	Kubernetes Kubernetes `yaml:"kubernetes"`
@@ -41,6 +44,23 @@ type Config struct {
 	// of running the full stack.
 	Agent *AgentConfig `yaml:"agent,omitempty"`
 }
+
+// Integration is one monitored service.
+type Integration struct {
+	Type    string `yaml:"type"`
+	Name    string `yaml:"name"`
+	Address string `yaml:"address"`
+	// Network is a Docker network the exporter joins to reach the service.
+	Network  string `yaml:"network,omitempty"`
+	Username string `yaml:"username,omitempty"`
+	Password string `yaml:"password,omitempty"`
+	Database string `yaml:"database,omitempty"`
+	Path     string `yaml:"path,omitempty"`
+}
+
+// IntegrationTypes are the supported integration types (kept in sync with
+// the integrations package by a test).
+var IntegrationTypes = []string{"mongodb", "mysql", "nginx", "postgres", "rabbitmq", "redis"}
 
 // Agent is a host registered with this server. Only a bcrypt hash of its
 // token is kept.
@@ -379,6 +399,8 @@ func (c Config) Validate() error {
 		}
 	}
 
+	errs = append(errs, c.validateIntegrations()...)
+
 	agentNames := map[string]bool{}
 	for _, a := range c.Agents {
 		if !targetNameRe.MatchString(a.Name) {
@@ -471,8 +493,47 @@ var (
 	sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
-func (c Config) validateAgent() error {
+var (
+	networkRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	credentialRe = regexp.MustCompile(`^[^'\n\r]*$`)
+)
+
+func (c Config) validateIntegrations() []error {
 	var errs []error
+	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
+	seen := map[string]bool{}
+	for _, in := range c.Integrations {
+		label := fmt.Sprintf("integration %q", in.Name)
+		if !slices.Contains(IntegrationTypes, in.Type) {
+			add("%s: unknown type %q (supported: %s)", label, in.Type, strings.Join(IntegrationTypes, ", "))
+		}
+		if !targetNameRe.MatchString(in.Name) {
+			add("integration name %q: use lowercase letters, digits, '-' or '_'", in.Name)
+		}
+		if seen[in.Name] {
+			add("integration name %q is used twice", in.Name)
+		}
+		seen[in.Name] = true
+		if host, port, err := net.SplitHostPort(in.Address); err != nil || host == "" || port == "" || strings.ContainsAny(in.Address, " '\"/") {
+			add("%s: address %q must be host:port, e.g. db:5432", label, in.Address)
+		}
+		if in.Network != "" && !networkRe.MatchString(in.Network) {
+			add("%s: network %q is not a valid Docker network name", label, in.Network)
+		}
+		for _, f := range []struct{ name, v string }{{"username", in.Username}, {"password", in.Password}, {"database", in.Database}} {
+			if !credentialRe.MatchString(f.v) {
+				add("%s: %s must not contain single quotes or newlines", label, f.name)
+			}
+		}
+		if in.Path != "" && !urlPathRe.MatchString(in.Path) {
+			add("%s: path %q must start with /", label, in.Path)
+		}
+	}
+	return errs
+}
+
+func (c Config) validateAgent() error {
+	errs := c.validateIntegrations()
 	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 	ag := c.Agent
 	if u, err := url.Parse(ag.Server); err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") {

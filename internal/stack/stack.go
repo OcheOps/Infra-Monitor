@@ -23,6 +23,7 @@ import (
 
 	"github.com/OcheOps/Infra-Monitor/deploy"
 	"github.com/OcheOps/Infra-Monitor/internal/config"
+	"github.com/OcheOps/Infra-Monitor/internal/integrations"
 )
 
 // Images maps each component to its pinned image. Compose services are read
@@ -60,11 +61,12 @@ const (
 
 // Data is what the templates see.
 type Data struct {
-	HTTPProbes []string
-	TCPProbes  []string
-	Targets    []config.Target
-	Retention  struct{ Metrics, Logs, Traces int } // hours
-	Namespace  string
+	HTTPProbes   []string
+	TCPProbes    []string
+	Targets      []config.Target
+	Integrations []integrations.Target
+	Retention    struct{ Metrics, Logs, Traces int } // hours
+	Namespace    string
 }
 
 func NewData(cfg config.Config) (Data, error) {
@@ -81,6 +83,7 @@ func NewData(cfg config.Config) (Data, error) {
 		}
 	}
 	d.Targets = cfg.Targets
+	d.Integrations = integrations.Targets(cfg.Integrations)
 	var err error
 	r := cfg.Retention
 	if d.Retention.Metrics, err = config.Hours(r.Metrics); err != nil {
@@ -102,7 +105,7 @@ func Quote(s string) string {
 	return string(b)
 }
 
-var funcs = template.FuncMap{"q": Quote}
+var funcs = template.FuncMap{"q": Quote, "trimPrefix": func(prefix, s string) string { return strings.TrimPrefix(s, prefix) }}
 
 func render(name string, data any, delims [2]string, srcs ...string) ([]byte, error) {
 	t := template.New(name).Funcs(funcs).Option("missingkey=error")
@@ -136,6 +139,9 @@ func PrometheusConfig(b Backend, d Data) ([]byte, error) {
 	src := "compose/config/prometheus.yml.tmpl"
 	if b == Kubernetes {
 		src = "k8s/prometheus.yml.tmpl"
+		// Exporters run as Compose services; clusters use their own
+		// (e.g. Helm charts) and add them as targets.
+		d.Integrations = nil
 	}
 	return render("prometheus", d, [2]string{}, src, "shared/prometheus-jobs.tmpl")
 }
@@ -418,6 +424,7 @@ type agentData struct {
 	Name, Token, Host, Port, MetricsURL string
 	CA                                  bool
 	Outputs                             []struct{ Match, Job string }
+	Integrations                        []integrations.Target
 }
 
 func newAgentData(ag config.AgentConfig, hasCA bool) (agentData, error) {
@@ -441,11 +448,12 @@ func newAgentData(ag config.AgentConfig, hasCA bool) (agentData, error) {
 
 // AgentFiles renders an agent host's config directory: Prometheus (agent
 // mode), Fluent Bit, the Docker log parser and the token file.
-func AgentFiles(ag config.AgentConfig, hasCA bool) (map[string][]byte, error) {
+func AgentFiles(ag config.AgentConfig, ints []config.Integration, hasCA bool) (map[string][]byte, error) {
 	d, err := newAgentData(ag, hasCA)
 	if err != nil {
 		return nil, err
 	}
+	d.Integrations = integrations.Targets(ints)
 	files := map[string][]byte{"token": []byte(ag.Token)}
 	if files["prometheus.yml"], err = render("agent-prometheus", d, [2]string{}, "agent/prometheus.yml.tmpl"); err != nil {
 		return nil, err

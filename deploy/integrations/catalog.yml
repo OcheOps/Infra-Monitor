@@ -1,0 +1,21 @@
+# Exporter images for `infra-monitor integrations`. Nothing here runs: the
+# CLI reads the image versions (and so does Dependabot, which keeps them
+# current). Service names are the integration types.
+name: infra-monitor-integrations-catalog
+
+services:
+  postgres:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    profiles: [catalog]
+  mysql:
+    image: prom/mysqld-exporter:v0.15.1
+    profiles: [catalog]
+  redis:
+    image: oliver006/redis_exporter:v1.62.0
+    profiles: [catalog]
+  mongodb:
+    image: percona/mongodb_exporter:0.40.0
+    profiles: [catalog]
+  nginx:
+    image: nginx/nginx-prometheus-exporter:1.3.0
+    profiles: [catalog]

@@ -448,6 +448,7 @@ func (a *app) menu() error {
 	}{
 		{"Check a website or service (add / remove URLs)", a.menuProbes},
 		{"Scrape another metrics endpoint (add / remove targets)", a.menuTargets},
+		{"Monitor a database, cache or web server on this host", a.menuIntegrations},
 		{"Alert notifications (Telegram, Slack, email, webhook)", a.menuNotify},
 		{"Public access over HTTPS and the status page", a.menuPublic},
 		{"Monitor another server (add an agent)", a.menuAgent},

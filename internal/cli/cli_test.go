@@ -324,7 +324,7 @@ func TestMenuAddProbeThenQuit(t *testing.T) {
 		"https://new.example.com", // URL
 		"",                        // done
 		"3",                       // apply now? not now
-		"11",                      // Quit
+		"12",                      // Quit
 	}, "\n") + "\n"
 	a.p = prompt.New(strings.NewReader(script), a.stdout)
 	a.interactive = true
@@ -680,6 +680,16 @@ func TestAgentJoin(t *testing.T) {
 		t.Errorf("probes add on an agent: %v", err)
 	}
 
+	// Agents monitor their own services too.
+	a.runT(t, "integrations", "add", "redis", "cache", "cache:6379")
+	a.runT(t, "compose", "sync")
+	if prom := mustRead(t, filepath.Join(dir, "config", "prometheus.yml")); !strings.Contains(prom, `"integration-cache:9121"`) {
+		t.Errorf("agent prometheus.yml doesn't scrape the integration:\n%s", prom)
+	}
+	if f := mustRead(t, filepath.Join(dir, "integrations.yml")); !strings.Contains(f, "- agent") {
+		t.Errorf("agent integrations.yml:\n%s", f)
+	}
+
 	a.runT(t, "agent", "leave")
 	if _, err := os.Stat(config.Path(a.dir)); err == nil {
 		t.Error("agent leave kept the config")
@@ -702,4 +712,93 @@ func mustRead(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func TestIntegrations(t *testing.T) {
+	a, out := newApp(t, "")
+	a.runT(t, "init")
+	a.runT(t, "integrations", "add", "postgres", "db", "shop-db-1:5432", "--network", "shop_default", "--password", fake("pg"))
+	a.runT(t, "integrations", "add", "rabbitmq", "mq", "host.docker.internal:15692")
+	if err := a.run([]string{"--dir", a.dir, "integrations", "add", "oracle", "x", "o:1521"}); err == nil || !strings.Contains(err.Error(), "supported") {
+		t.Errorf("unknown type: %v", err)
+	}
+	if err := a.run([]string{"--dir", a.dir, "integrations", "add", "redis", "db", "r:6379"}); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("duplicate name: %v", err)
+	}
+
+	out.Reset()
+	a.runT(t, "config", "show")
+	if strings.Contains(out.String(), fake("pg")) {
+		t.Error("config show printed the integration password")
+	}
+
+	a.runT(t, "compose", "sync")
+	dir := a.composeDir()
+	prom := mustRead(t, filepath.Join(dir, "config", "prometheus.yml"))
+	for _, want := range []string{`job_name: "integration-db"`, `"integration-db:9187"`, `job_name: "integration-mq"`, `replacement: "mq"`} {
+		if !strings.Contains(prom, want) {
+			t.Errorf("prometheus.yml missing %q", want)
+		}
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "integrations", "db.env")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("db.env: %v %v", fi, err)
+	}
+	if !strings.Contains(mustRead(t, filepath.Join(dir, "integrations.yml")), "shop_default") {
+		t.Error("integrations.yml doesn't join the service's network")
+	}
+	out.Reset()
+	a.runT(t, "k8s", "render")
+	if strings.Contains(out.String(), "integration-db") {
+		t.Error("Kubernetes Prometheus scrapes a Compose-only exporter")
+	}
+
+	a.runT(t, "integrations", "remove", "db")
+	a.runT(t, "compose", "sync")
+	if _, err := os.Stat(filepath.Join(dir, "integrations", "db.env")); err == nil {
+		t.Error("removed integration's credentials left behind")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "integrations.yml")); err == nil {
+		t.Error("integrations.yml kept with no exporters left")
+	}
+
+	// detect without a terminal prints the commands to run.
+	detectRunner = func(name string, args ...string) (string, error) {
+		if args[0] == "ps" {
+			return "cache\tredis:7\t\nshop-db-1\tpostgres:16\tshop\n", nil
+		}
+		if args[0] == "inspect" {
+			return "shop_default ", nil
+		}
+		return "", errors.New("no")
+	}
+	t.Cleanup(func() { detectRunner = nil })
+	out.Reset()
+	a.runT(t, "integrations", "detect")
+	for _, want := range []string{"infra-monitor integrations add postgres shop-db-1 shop-db-1:5432 --network shop_default --username postgres --password PASSWORD", "integrations add redis cache cache:6379"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("detect output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestIntegrationsDetectInteractive(t *testing.T) {
+	a, _ := newApp(t, "")
+	a.runT(t, "init")
+	a.interactive = true
+	a.p = prompt.New(strings.NewReader("y\n\n"+fake("pg")+"\nn\n3\n"), io.Discard)
+	detectRunner = func(name string, args ...string) (string, error) {
+		if args[0] == "ps" {
+			return "shop-db-1\tpostgres:16\tshop\ncache\tredis:7\tshop\n", nil
+		}
+		return "shop_default ", nil
+	}
+	t.Cleanup(func() { detectRunner = nil })
+	if err := a.integrationsDetect(nil); err != nil {
+		t.Fatal(err)
+	}
+	got := a.cfgT(t).Integrations
+	want := []config.Integration{{Type: "postgres", Name: "shop-db-1", Address: "shop-db-1:5432", Network: "shop_default", Username: "postgres", Password: fake("pg")}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("integrations = %+v", got)
+	}
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/OcheOps/Infra-Monitor/deploy"
 	"github.com/OcheOps/Infra-Monitor/internal/config"
+	"github.com/OcheOps/Infra-Monitor/internal/integrations"
 	"github.com/OcheOps/Infra-Monitor/internal/stack"
 )
 
@@ -30,7 +31,10 @@ const EnvFile = ".env"
 
 // managedDirs hold only files the CLI writes; anything else in them is
 // removed on sync, so deleted custom rules and dashboards disappear.
-var managedDirs = []string{"alerts", "provisioning/dashboards", "gateway/status"}
+var managedDirs = []string{"alerts", "provisioning/dashboards", "gateway/status", "integrations"}
+
+// IntegrationsFile is the generated Compose file holding exporter services.
+const IntegrationsFile = "integrations.yml"
 
 // Sync writes the compose project into dir, replacing files the CLI owns.
 // It reports whether a file that already existed changed, meaning running
@@ -96,6 +100,10 @@ func Sync(dir string, cfg config.Config, extras stack.Extras) (changed bool, err
 	for k, v := range dashboards {
 		files["provisioning/dashboards/"+k] = v
 	}
+	intFile, intEnvs, err := integrations.ComposeFile(cfg.Integrations, "monitor")
+	if err != nil {
+		return false, err
+	}
 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return false, err
@@ -111,12 +119,21 @@ func Sync(dir string, cfg config.Config, extras stack.Extras) (changed bool, err
 	if dom := cfg.Gateway.Domain; dom != "" {
 		gwHTTP, gwHTTPS, rootURL = "80", "443", "https://"+dom+"/"
 	}
+	if err := writeIntegrations(dir, intFile, intEnvs, &changed); err != nil {
+		return changed, err
+	}
 	env := fmt.Sprintf("GRAFANA_ADMIN_PASSWORD='%s'\nPROMETHEUS_RETENTION=%dh\nGATEWAY_HTTP=%s\nGATEWAY_HTTPS=%s\nGRAFANA_ROOT_URL=%s\n",
 		cfg.Grafana.AdminPassword, d.Retention.Metrics, gwHTTP, gwHTTPS, rootURL)
 	if _, err := writeFile(dir, EnvFile, []byte(env), 0o600); err != nil {
 		return changed, err
 	}
 
+	for name := range intEnvs {
+		files["integrations/"+name] = nil
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "integrations"), 0o700); err != nil {
+		return changed, err
+	}
 	for _, md := range managedDirs {
 		entries, err := os.ReadDir(filepath.Join(dir, md))
 		if err != nil {
@@ -157,15 +174,20 @@ func writeFile(dir, rel string, data []byte, mode os.FileMode) (bool, error) {
 	return existed, os.Chmod(p, mode)
 }
 
-// Command builds a `docker compose` invocation for the project in dir.
+// Command builds a `docker compose` invocation for the project in dir,
+// including the generated integrations file when there is one.
 func Command(project, dir string, args ...string) *exec.Cmd {
-	full := append([]string{
+	full := []string{
 		"compose",
 		"--project-name", project,
 		"--project-directory", dir,
 		"--file", filepath.Join(dir, "docker-compose.yml"),
-		"--env-file", filepath.Join(dir, EnvFile),
-	}, args...)
+	}
+	if _, err := os.Stat(filepath.Join(dir, IntegrationsFile)); err == nil {
+		full = append(full, "--file", filepath.Join(dir, IntegrationsFile))
+	}
+	full = append(full, "--env-file", filepath.Join(dir, EnvFile))
+	full = append(full, args...)
 	cmd := exec.Command("docker", full...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd
@@ -181,7 +203,7 @@ func SyncAgent(dir string, cfg config.Config, ca []byte) (changed bool, err erro
 		return false, errors.New("this host is not an agent")
 	}
 	ag := *cfg.Agent
-	files, err := stack.AgentFiles(ag, ca != nil)
+	files, err := stack.AgentFiles(ag, cfg.Integrations, ca != nil)
 	if err != nil {
 		return false, err
 	}
@@ -215,6 +237,17 @@ func SyncAgent(dir string, cfg config.Config, ca []byte) (changed bool, err erro
 		return changed, err
 	}
 
+	intFile, intEnvs, err := integrations.ComposeFile(cfg.Integrations, "agent")
+	if err != nil {
+		return changed, err
+	}
+	if err := writeIntegrations(dir, intFile, intEnvs, &changed); err != nil {
+		return changed, err
+	}
+	if err := pruneDir(filepath.Join(dir, "integrations"), intEnvs, &changed); err != nil {
+		return changed, err
+	}
+
 	env := ""
 	if ag.ServerIP != "" {
 		u, err := url.Parse(ag.Server)
@@ -227,4 +260,54 @@ func SyncAgent(dir string, cfg config.Config, ca []byte) (changed bool, err erro
 		return changed, err
 	}
 	return changed, nil
+}
+
+// writeIntegrations writes (or removes) the integrations Compose file and the
+// exporters' credential env files, which only the owner can read.
+func writeIntegrations(dir string, file []byte, envs map[string][]byte, changed *bool) error {
+	path := filepath.Join(dir, IntegrationsFile)
+	if file == nil {
+		if err := os.Remove(path); err == nil {
+			*changed = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	} else {
+		c, err := writeFile(dir, IntegrationsFile, file, 0o644)
+		if err != nil {
+			return err
+		}
+		*changed = *changed || c
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "integrations"), 0o700); err != nil {
+		return err
+	}
+	for name, data := range envs {
+		c, err := writeFile(dir, "integrations/"+name, data, 0o600)
+		if err != nil {
+			return err
+		}
+		*changed = *changed || c
+	}
+	return nil
+}
+
+// pruneDir removes files in dir that aren't in keep.
+func pruneDir(dir string, keep map[string][]byte, changed *bool) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, ent := range entries {
+		if _, ok := keep[ent.Name()]; !ok {
+			if err := os.RemoveAll(filepath.Join(dir, ent.Name())); err != nil {
+				return err
+			}
+			*changed = true
+		}
+	}
+	return nil
 }

@@ -192,8 +192,8 @@ func TestRender(t *testing.T) {
 			}
 		}
 	}
-	if n != 2 {
-		t.Errorf("found %d dashboard ConfigMaps, want 2", n)
+	if n != 3 {
+		t.Errorf("found %d dashboard ConfigMaps, want 3", n)
 	}
 }
 
@@ -232,7 +232,7 @@ func TestRenderExtras(t *testing.T) {
 		t.Error("custom rule missing")
 	}
 	names, err := DashboardConfigMaps(extras)
-	if err != nil || len(names) != 3 {
+	if err != nil || len(names) != 4 {
 		t.Fatalf("DashboardConfigMaps = %v, %v", names, err)
 	}
 	for _, n := range names {

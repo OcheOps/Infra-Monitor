@@ -1,0 +1,43 @@
+# Integration alerts: ServiceDown names the service, and RedisMemoryHigh
+# ignores Redis without maxmemory.
+rule_files:
+  - integrations.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'pg_up{job="integration-db",instance="db"}'
+        values: '1x3 0x5'
+      - series: 'redis_up{job="integration-cache",instance="cache"}'
+        values: '1x8'
+      - series: 'redis_memory_used_bytes{job="integration-cache",instance="cache"}'
+        values: '95x8'
+      - series: 'redis_memory_max_bytes{job="integration-cache",instance="cache"}'
+        values: '100x8'
+      - series: 'redis_memory_used_bytes{job="integration-sessions",instance="sessions"}'
+        values: '95x8'
+      - series: 'redis_memory_max_bytes{job="integration-sessions",instance="sessions"}'
+        values: '0x8'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: PostgreSQL
+              job: integration-db
+              instance: db
+            exp_annotations:
+              summary: "PostgreSQL db is down or refuses the exporter's login"
+      - eval_time: 7m
+        alertname: RedisMemoryHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: integration-cache
+              instance: cache
+            exp_annotations:
+              summary: "Redis cache uses 95% of maxmemory"
